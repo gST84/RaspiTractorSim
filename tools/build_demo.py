@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Builds the online demo: the simulator and the demo implement run in the browser (Pyodide), no Pi needed.
 
-    python3 tools/build_demo.py [OUT]          # default: dist/demo
-    python3 -m http.server -d dist/demo 8000   # try it: http://localhost:8000
+    python3 tools/build_demo.py [OUT]              # default: dist/demo (GitHub Pages: .github/workflows/pages.yml)
+    python3 tools/build_demo.py --fragment OUT     # page without <html>/<head>/<body>, for a host that adds them
+    python3 -m http.server -d dist/demo 8000       # try it: http://localhost:8000
 
-OUT gets index.html (page without <html>/<head>/<body>, CSS inlined), the web modules, pysrc.json (the Python
+OUT gets index.html (CSS inlined), the web modules, pysrc.json (the Python
 sources) and pyodide/ (Pyodide core, downloaded once from the npm CDN into .demo-cache/). Every file is loaded
 from the same origin, so the page also works where only same-origin requests are allowed.
 """
@@ -84,6 +85,7 @@ DEMO_CSS = """
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 30; background: var(--top); }
 .demo-badge { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px;
   background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+@media (max-width: 760px) { .demo-badge { display: none; } }
 #boot { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: var(--bg);
   padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px))
            max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
@@ -124,7 +126,7 @@ def theme_css(css):
     return css[:m.start()] + dark + css[m.end():]
 
 
-def page(out_css):
+def page(out_css, fragment=False):
     html = open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
     body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
     body = re.sub(r'<script type="module" src="app.js"></script>\s*', "", body)
@@ -132,7 +134,11 @@ def page(out_css):
                         'browser op een gesimuleerde CAN-bus, met een testwerktuig">demo</span>', 1)
     head = ('<title>RaspiTractorSim</title>\n<meta name="theme-color" content="#1f2a22">\n'
             f"<style>\n{out_css}\n{DEMO_CSS}</style>\n")
-    return head + body.strip() + "\n" + BOOT
+    if fragment:
+        return head + body.strip() + "\n" + BOOT
+    return ('<!doctype html>\n<html lang="nl">\n<head>\n<meta charset="utf-8">\n'
+            '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
+            '<link rel="icon" href="icon.svg">\n' + head + "</head>\n<body>\n" + body.strip() + "\n" + BOOT + "</body>\n</html>\n")
 
 
 def python_sources():
@@ -146,7 +152,7 @@ def python_sources():
     return src
 
 
-def build(out):
+def build(out, fragment=False):
     cache = fetch_pyodide()
     if os.path.isdir(out):
         shutil.rmtree(out)
@@ -161,7 +167,7 @@ def build(out):
             shutil.copy(os.path.join(cache, name), os.path.join(out, "pyodide", name))
     css = theme_css(open(os.path.join(ROOT, "web", "style.css"), encoding="utf-8").read())
     with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as fh:
-        fh.write(page(css))
+        fh.write(page(css, fragment))
     with open(os.path.join(out, "pysrc.json"), "w", encoding="utf-8") as fh:
         json.dump(python_sources(), fh)
     files = sorted(os.path.relpath(os.path.join(d, f), out) for d, _, fs in os.walk(out) for f in fs)
@@ -171,4 +177,5 @@ def build(out):
 
 
 if __name__ == "__main__":
-    build(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "dist", "demo")))
+    args = [a for a in sys.argv[1:] if a != "--fragment"]
+    build(os.path.abspath(args[0] if args else os.path.join(ROOT, "dist", "demo")), fragment="--fragment" in sys.argv[1:])

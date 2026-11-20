@@ -14,6 +14,10 @@ scherm (object pool) toont.
 Geen externe Python-pakketten: SocketCAN, de webserver en de WebSocket komen uit de standaardbibliotheek
 (Python 3.9 of nieuwer). Getest zonder hardware op de virtuele bus; nog **niet getest op een Pi met een echt werktuig**.
 
+**Online demo: https://gst84.github.io/RaspiTractorSim/**: dezelfde simulator met een testwerktuig, volledig in de
+browser (Python via Pyodide, ongeveer 15 MB bij de eerste keer laden). Downloads (pool, CAN-log, instellingen) zijn
+daar uitgeschakeld en na herladen begint alles opnieuw. Zelf bouwen: `python3 tools/build_demo.py` (map `dist/demo`).
+
 ## Pagina's
 
 | Pagina | Wat |

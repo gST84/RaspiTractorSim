@@ -1,0 +1,50 @@
+# Tests, and the online demo on GitHub Pages: tools/build_demo.py builds a page on which the simulator
+# and the demo implement run in the browser (Pyodide). Pull requests only build; main also deploys.
+name: Demo op GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
+      - uses: actions/cache@v4
+        with:
+          path: .demo-cache
+          key: pyodide-${{ hashFiles('tools/build_demo.py') }}
+      - name: Demo bouwen
+        run: python3 tools/build_demo.py dist/demo
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/demo
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

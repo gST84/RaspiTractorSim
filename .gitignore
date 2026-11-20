@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.devdata/
+.DS_Store
+dist/
+.demo-cache/

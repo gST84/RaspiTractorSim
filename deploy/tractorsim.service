@@ -1,0 +1,22 @@
+# systemd-service voor RaspiTractorSim. deploy/install.sh vult USER en DIR in en installeert hem.
+[Unit]
+Description=RaspiTractorSim - ISOBUS-tractorsimulator met virtuele terminal
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@DIR@
+# CAN-interface opzetten (met rootrechten dankzij de '+'): ISOBUS = 250 kbit/s.
+# restart-ms: na bus-off automatisch opnieuw starten; txqueuelen: ruimte voor een volledig TP/ETP-venster.
+ExecStartPre=+/sbin/ip link set @CAN@ down
+ExecStartPre=+/sbin/ip link set @CAN@ type can bitrate 250000 restart-ms 100
+ExecStartPre=+/sbin/ip link set @CAN@ txqueuelen 1000
+ExecStartPre=+/sbin/ip link set @CAN@ up
+ExecStart=/usr/bin/python3 -m tractorsim --bus @CAN@ --port @PORT@
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

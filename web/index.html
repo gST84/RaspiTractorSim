@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f2a22">
+<title>RaspiTractorSim</title>
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#tractor"><img src="icon.svg" alt="" width="22" height="22">RaspiTractorSim</a>
+  <nav id="tabs">
+    <a href="#tractor">Tractor</a>
+    <a href="#vt">Virtuele terminal</a>
+    <a href="#bus">Bus</a>
+    <a href="#instellingen">Instellingen</a>
+  </nav>
+  <div class="status">
+    <span id="cfstat"></span>
+    <span id="busstat" class="muted"></span>
+    <span id="conn" class="dot" title="verbinden…"></span>
+  </div>
+</header>
+<div id="stopbanner">Stopschakelaar werktuigen staat op STOP</div>
+<main>
+  <section id="page-tractor" class="page"></section>
+  <section id="page-vt" class="page" hidden></section>
+  <section id="page-bus" class="page" hidden></section>
+  <section id="page-instellingen" class="page" hidden></section>
+</main>
+<div id="toasts"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

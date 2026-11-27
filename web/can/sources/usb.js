@@ -442,7 +442,11 @@ export class UsbSource {
   async readLoop() {
     const d = this.device;
     const pending = [];
-    const next = () => d.transferIn(this.inEp, this.inLen);
+    const next = () => {
+      const p = d.transferIn(this.inEp, this.inLen);
+      p.catch(() => {}); // on close every waiting read rejects; only the awaited one is handled below
+      return p;
+    };
     try {
       for (let i = 0; i < 4; i++) pending.push(next());
       while (!this.closed) {

@@ -3,11 +3,14 @@
 
     python3 tools/build_demo.py [OUT]              # default: dist/demo (GitHub Pages: .github/workflows/pages.yml)
     python3 tools/build_demo.py --fragment OUT     # page without <html>/<head>/<body>, for a host that adds them
-    python3 -m http.server -d dist/demo 8000       # try it: http://localhost:8000
+    python3 tools/build_demo.py --analyzer OUT     # only the CAN analyzer (page Variabelen), no Pyodide
+    python3 -m http.server -d dist/demo 8000       # try it: http://localhost:8000 (analyzer: /analyzer/)
 
 OUT gets index.html (CSS inlined), the web modules, pysrc.json (the Python
 sources) and pyodide/ (Pyodide core, downloaded once from the npm CDN into .demo-cache/). Every file is loaded
 from the same origin, so the page also works where only same-origin requests are allowed.
+OUT/analyzer/ gets the light analyzer: the page Variabelen alone, with USB/serial adapters (WebUSB, WebSerial)
+and log files, without the simulator. WebUSB and WebSerial need https or localhost (GitHub Pages is https).
 """
 import base64
 import json
@@ -141,6 +144,38 @@ def page(out_css, fragment=False):
             '<link rel="icon" href="icon.svg">\n' + head + "</head>\n<body>\n" + body.strip() + "\n" + BOOT + "</body>\n</html>\n")
 
 
+ANALYZER_CSS = """
+.analyzer-badge { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+"""
+
+
+def analyzer_page(out_css):
+    html = open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
+    body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
+    body = body.replace('RaspiTractorSim</a>', 'RaspiTractorSim</a>\n  <span class="analyzer-badge" title="Enkel de CAN-analyzer: '
+                        'USB- of seriële adapter, of een logbestand">analyzer</span>', 1)
+    return ('<!doctype html>\n<html lang="nl">\n<head>\n<meta charset="utf-8">\n'
+            '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
+            '<meta name="theme-color" content="#1f2a22">\n<link rel="icon" href="icon.svg">\n'
+            '<title>RaspiTractorSim Analyzer</title>\n'
+            f"<style>\n{out_css}\n{ANALYZER_CSS}</style>\n</head>\n<body data-mode=\"analyzer\">\n{body.strip()}\n</body>\n</html>\n")
+
+
+def build_analyzer(out):
+    """The CAN analyzer alone (no Pyodide, about 300 kB): app.js shows only the page Variabelen."""
+    if os.path.isdir(out):
+        shutil.rmtree(out)
+    shutil.copytree(os.path.join(ROOT, "web"), out, ignore=shutil.ignore_patterns("index.html", "style.css", ".DS_Store"))
+    css = theme_css(open(os.path.join(ROOT, "web", "style.css"), encoding="utf-8").read())
+    with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as fh:
+        fh.write(analyzer_page(css))
+    files = sorted(os.path.relpath(os.path.join(d, f), out) for d, _, fs in os.walk(out) for f in fs)
+    total = sum(os.path.getsize(os.path.join(out, f)) for f in files)
+    print(f"analyzer: {len(files)} bestanden, {total / 1e3:.0f} kB in {out}")
+    return files
+
+
 def python_sources():
     src = {}
     for item in PY_SOURCES:
@@ -173,9 +208,15 @@ def build(out, fragment=False):
     files = sorted(os.path.relpath(os.path.join(d, f), out) for d, _, fs in os.walk(out) for f in fs)
     total = sum(os.path.getsize(os.path.join(out, f)) for f in files)
     print(f"{len(files)} bestanden, {total / 1e6:.1f} MB in {out}")
+    if not fragment:
+        build_analyzer(os.path.join(out, "analyzer"))
     return files
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--fragment"]
-    build(os.path.abspath(args[0] if args else os.path.join(ROOT, "dist", "demo")), fragment="--fragment" in sys.argv[1:])
+    flags = {"--fragment", "--analyzer"}
+    args = [a for a in sys.argv[1:] if a not in flags]
+    if "--analyzer" in sys.argv[1:]:
+        build_analyzer(os.path.abspath(args[0] if args else os.path.join(ROOT, "dist", "analyzer")))
+    else:
+        build(os.path.abspath(args[0] if args else os.path.join(ROOT, "dist", "demo")), fragment="--fragment" in sys.argv[1:])

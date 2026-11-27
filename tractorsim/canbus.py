@@ -4,9 +4,14 @@
   Python standard library (socket.AF_CAN), no python-can needed.
 - HubBus / HubClientBus: a virtual CAN bus over UDP for testing without hardware (also on macOS).
   The simulator hosts the hub; other programs (tools/fake_implement.py) connect to it as clients.
+- PythonCanBus: any interface of python-can (PCAN, Kvaser, Vector, IXXAT, slcan, ...), only when python-can
+  is installed: "pythoncan:<interface>:<channel>".
 
 Every bus delivers received frames to the callbacks in `listeners` as (can_id, data, timestamp),
 where can_id is the 29-bit identifier without flags. Only extended (29-bit) data frames are passed on.
+`raw_listeners` get every frame, 11-bit included, as (direction, can_id, data, timestamp, extended):
+that is what the analyzer page (Variabelen) decodes.
+With `listen_only` set (tractorsim --listen) send() drops every frame: nothing goes on the bus.
 """
 import asyncio
 import collections
@@ -22,6 +27,7 @@ CAN_EFF_FLAG = 0x80000000
 CAN_RTR_FLAG = 0x40000000
 CAN_ERR_FLAG = 0x20000000
 CAN_EFF_MASK = 0x1FFFFFFF
+CAN_SFF_MASK = 0x7FF
 _FRAME = struct.Struct("=IB3x8s")  # struct can_frame
 _UDP = struct.Struct("<IB8s")  # virtual bus datagram: id, dlc, data
 HUB_HELLO = b"TSIM-HELLO"
@@ -37,11 +43,14 @@ class Bus:
     """Common part: listeners, statistics and a transmit queue that survives a full TX buffer."""
 
     name = "bus"
+    listen_only = False
 
     def __init__(self):
         self.listeners = []
         self.tx_listeners = []
-        self.stats = {"rx": 0, "tx": 0, "txDropped": 0, "errors": 0, "lastError": "", "rxRate": 0, "txRate": 0, "load": 0.0}
+        self.raw_listeners = []
+        self.stats = {"rx": 0, "tx": 0, "txDropped": 0, "txBlocked": 0, "errors": 0, "lastError": "", "rxRate": 0, "txRate": 0,
+                      "load": 0.0}
         self._txq = collections.deque()
         self._flush_handle = None
         self._rate_t = time.monotonic()
@@ -50,10 +59,17 @@ class Bus:
         self._bits = 0
 
     # ----- receive side
-    def _deliver(self, can_id, data):
+    def _deliver(self, can_id, data, ext=True):
         self.stats["rx"] += 1
         self._bits += 64 + 8 * len(data)
         t = time.time()
+        for cb in self.raw_listeners:
+            try:
+                cb("rx", can_id, data, t, ext)
+            except Exception:
+                log.exception("fout in raw-listener")
+        if not ext:
+            return
         for cb in self.listeners:
             try:
                 cb(can_id, data, t)
@@ -64,6 +80,9 @@ class Bus:
     def send(self, can_id, data):
         """Queues a 29-bit frame. Never blocks; frames wait in a queue when the driver is busy."""
         data = bytes(data)
+        if self.listen_only:
+            self.stats["txBlocked"] += 1
+            return
         if len(self._txq) > 5000:
             self.stats["txDropped"] += 1
             return
@@ -90,6 +109,11 @@ class Bus:
             self.stats["tx"] += 1
             self._bits += 64 + 8 * len(data)
             t = time.time()
+            for cb in self.raw_listeners:
+                try:
+                    cb("tx", can_id, data, t, True)
+                except Exception:
+                    log.exception("fout in raw-listener")
             for cb in self.tx_listeners:
                 try:
                     cb(can_id, data, t)
@@ -157,7 +181,10 @@ class SocketCanBus(Bus):
                 cls = can_id & 0x1FFFFFFF
                 self.stats["lastError"] = ", ".join(v for k, v in ERR_CLASSES.items() if cls & k) or f"foutframe 0x{cls:X}"
                 continue
-            if not can_id & CAN_EFF_FLAG or can_id & CAN_RTR_FLAG:
+            if can_id & CAN_RTR_FLAG:
+                continue
+            if not can_id & CAN_EFF_FLAG:  # 11-bit: only for the analyzer
+                self._deliver(can_id & CAN_SFF_MASK, data[: min(dlc, 8)], ext=False)
                 continue
             self._deliver(can_id & CAN_EFF_MASK, data[: min(dlc, 8)])
 
@@ -282,10 +309,67 @@ class MemoryBus(Bus):
             self.group.remove(self)
 
 
-def open_bus(spec):
+class PythonCanBus(Bus):
+    """An interface of python-can (optional dependency): PCAN, Kvaser, Vector, IXXAT, slcan, socketcan, ...
+    The driver of the manufacturer must be installed; python-can calls it from its own thread and the Notifier
+    hands every frame to the asyncio loop."""
+
+    def __init__(self, interface, channel, bitrate=250000, listen=False):
+        super().__init__()
+        try:
+            import can  # noqa: PLC0415 - optional
+        except ImportError as e:
+            raise RuntimeError("python-can is niet geïnstalleerd: pip install python-can (plus de driver van de fabrikant)") from e
+        self.can = can
+        self.interface, self.channel = interface, channel
+        self.name = f"python-can {interface}:{channel}"
+        self.bitrate = bitrate
+        self.listen = listen
+        self.dev = None
+        self.notifier = None
+
+    async def start(self):
+        kw = {"interface": self.interface, "channel": self.channel}
+        if self.interface not in ("socketcan", "virtual"):
+            kw["bitrate"] = self.bitrate
+        if self.listen and self.interface == "pcan":
+            kw["state"] = self.can.BusState.PASSIVE  # PCAN listen-only
+        self.dev = self.can.Bus(**kw)
+        self.notifier = self.can.Notifier(self.dev, [self._on_msg], loop=asyncio.get_event_loop())
+        log.info("python-can %s:%s geopend", self.interface, self.channel)
+
+    def _on_msg(self, msg):
+        if msg.is_error_frame:
+            self.stats["errors"] += 1
+            self.stats["lastError"] = "foutframe"
+            return
+        if msg.is_remote_frame:
+            return
+        self._deliver(msg.arbitration_id, bytes(msg.data[: min(msg.dlc, 8)]), ext=bool(msg.is_extended_id))
+
+    def _write(self, can_id, data):
+        try:
+            self.dev.send(self.can.Message(arbitration_id=can_id, data=data, is_extended_id=True), timeout=0)
+        except self.can.CanError as e:
+            raise OSError(errno.ENOBUFS, str(e)) from e
+
+    def close(self):
+        if self.notifier:
+            self.notifier.stop()
+        if self.dev:
+            self.dev.shutdown()
+        self.dev = self.notifier = None
+
+
+def open_bus(spec, bitrate=250000, listen=False):
     """'can0' / 'vcan0' → SocketCAN; 'virtual' or 'virtual:HOST:PORT' → hub; 'client:HOST:PORT' → hub client;
-    'memory' or 'memory:GROUP' → in-process bus."""
+    'memory' or 'memory:GROUP' → in-process bus; 'pythoncan:INTERFACE:CHANNEL' → python-can."""
     kind, _, rest = spec.partition(":")
+    if kind == "pythoncan":
+        interface, _, channel = rest.partition(":")
+        if not interface or not channel:
+            raise ValueError("gebruik pythoncan:INTERFACE:KANAAL, bv. pythoncan:pcan:PCAN_USBBUS1 of pythoncan:kvaser:0")
+        return PythonCanBus(interface, channel, bitrate, listen)
     if kind == "memory":
         return MemoryBus(rest or "default")
     if kind == "virtual":

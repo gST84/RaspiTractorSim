@@ -296,5 +296,88 @@ class TestEndToEnd(unittest.TestCase):
         run(go())
 
 
+class FakeWeb:
+    def __init__(self):
+        self.sent = []
+
+    async def start(self):
+        pass
+
+    def broadcast(self, obj, sub=None):
+        self.sent.append((obj, sub))
+
+
+class FakeClient:
+    def __init__(self):
+        self.subs = set()
+        self.got = []
+
+    def send(self, obj):
+        self.got.append(obj)
+
+
+class TestAnalyzer(unittest.TestCase):
+    """--listen and the lossless "raw" subscription of the page Variabelen."""
+
+    def _app(self, listen, group):
+        from tractorsim.app import App
+        return App(f"memory:{group}", tempfile.mkdtemp(), None, None, None, web=FakeWeb(), listen=listen)
+
+    def test_listen_sends_nothing(self):
+        from tractorsim.canbus import MemoryBus
+
+        async def go():
+            app = self._app(True, "listen")
+            peer = MemoryBus("listen")
+            await app.start()
+            peer.send(make_id(6, 0xEE00, 0x80), name_encode({"identity": 9, "function": 130}).to_bytes(8, "little"))
+            await asyncio.sleep(1.2)
+            app.on_client(FakeClient(), {"t": "send", "id": "18EAFFF0", "data": "00EE00"})
+            await asyncio.sleep(0.1)
+            self.assertEqual(app.cfs, {})
+            self.assertEqual(app.bus.stats["tx"], 0)
+            self.assertTrue(app.bus_state()["listen"])
+            self.assertIn(0x80, app.claims)
+            app.bus.close()
+            peer.close()
+        run(go())
+
+    def test_raw_subscription(self):
+        from tractorsim.canbus import MemoryBus
+
+        async def go():
+            app = self._app(True, "raw")
+            peer = MemoryBus("raw")
+            await app.start()
+            claim = name_encode({"identity": 9, "function": 130}).to_bytes(8, "little")
+            peer.send(make_id(6, 0xEE00, 0x81), claim)
+            await asyncio.sleep(0.05)
+            app.bus._deliver(0x123, b"\x01\x02", ext=False)  # what SocketCAN delivers for an 11-bit frame
+            c = FakeClient()
+            app.on_client(c, {"t": "sub", "name": "raw", "on": True})
+            first = c.got[-1]
+            self.assertEqual(first["t"], "raw")
+            self.assertTrue(first["reset"])
+            self.assertEqual(first["rows"][0][2], make_id(6, 0xEE00, 0x81))  # the NAMEs come first
+            await asyncio.sleep(0.25)
+            raws = [o for o, sub in app.web.sent if o.get("t") == "raw"]
+            rows = [r for o in raws for r in o["rows"]]
+            self.assertIn((0x123, "0102", 0), [(r[2], r[3], r[4]) for r in rows])
+            self.assertTrue(all(sub == "raw" for o, sub in app.web.sent if o.get("t") == "raw"))
+            app.bus.close()
+            peer.close()
+        run(go())
+
+    def test_pythoncan_spec(self):
+        from tractorsim.canbus import open_bus
+        with self.assertRaises(ValueError):
+            open_bus("pythoncan:pcan")
+        try:
+            import can  # noqa: F401
+        except ImportError:
+            with self.assertRaises(RuntimeError):
+                open_bus("pythoncan:pcan:PCAN_USBBUS1")
+
+
 if __name__ == "__main__":
     unittest.main()

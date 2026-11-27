@@ -25,6 +25,8 @@ jobs:
           python-version: "3.12"
       - name: Tests
         run: python3 -m unittest discover -s tests -v
+      - name: JS-tests (analyzer)
+        run: node tests/js/run.mjs
       - uses: actions/cache@v4
         with:
           path: .demo-cache

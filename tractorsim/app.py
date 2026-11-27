@@ -48,15 +48,18 @@ def cf_name(c):
 
 
 class App:
-    def __init__(self, bus_spec, data_dir, web_dir, host, port, bitrate=250000, web=None):
-        """`web` replaces the HTTP/WebSocket server (the browser demo passes its own link to the page)."""
+    def __init__(self, bus_spec, data_dir, web_dir, host, port, bitrate=250000, web=None, listen=False):
+        """`web` replaces the HTTP/WebSocket server (the browser demo passes its own link to the page).
+        `listen`: analyzer only (--listen): no control functions and nothing is ever sent on the bus."""
         self.bus_spec = bus_spec
         self.data_dir = data_dir
         self.cfg_path = os.path.join(data_dir, "config.json")
         os.makedirs(data_dir, exist_ok=True)
         self.cfg = self._load()
         self.bitrate = bitrate
-        self.bus = open_bus(bus_spec)
+        self.listen = listen
+        self.bus = open_bus(bus_spec, bitrate, listen)
+        self.bus.listen_only = listen
         self.net = Network(self.bus)
         self.sim = Sim(self.cfg.get("params"))
         self.cfs = {}
@@ -68,6 +71,9 @@ class App:
         self.web = web
         self.frames = collections.deque(maxlen=3000)
         self.frames_pending = []
+        self.raw_pending = []  # every frame for the "raw" subscription (page Variabelen), 11-bit included
+        self.raw_lost = 0
+        self.claims = {}  # source address → last Address Claimed frame, so a late analyzer still knows the NAMEs
         self.vtlog_rows = collections.deque(maxlen=400)
         self.vtlog_pending = []
         self.dirty = {"params": set(), "vt": False, "rx": False}
@@ -75,6 +81,7 @@ class App:
         self._save_at = None
         self.bus.listeners.append(lambda i, d, t: self._frame("rx", i, d, t))
         self.bus.tx_listeners.append(lambda i, d, t: self._frame("tx", i, d, t))
+        self.bus.raw_listeners.append(self._raw)
 
     # ------------------------------------------------------------ config
     def _load(self):
@@ -124,7 +131,7 @@ class App:
                 old = self.cfs.pop(key, None)
                 if old:
                     old.stop()
-                if self.cfg["cf"][key]["enabled"]:
+                if self.cfg["cf"][key]["enabled"] and not self.listen:
                     self.cfs[key] = self._make_cf(self.cfg["cf"][key])
             self.tractor = Tractor(self.net, {k: v for k, v in self.cfs.items() if k in ("tecu", "gnss")},
                                    self.sim, self.cfg["messages"], self)
@@ -141,7 +148,7 @@ class App:
                 old.stop()
             self.vt = None
             c = self.cfg["cf"]["vt"]
-            if c["enabled"]:
+            if c["enabled"] and not self.listen:
                 self.cfs["vt"] = self._make_cf(c)
                 self.vt = VTServer(self.net, self.cfs["vt"], c, self.data_dir, self, self.sim.language)
                 asyncio.get_event_loop().call_later(3.5 if restart else 0, self._start_vt, self.vt)
@@ -183,6 +190,15 @@ class App:
     def identify(self):
         c = self.cfg["cf"]["vt"]
         self.web.broadcast({"t": "vt.identify", "instance": c["functionInstance"]})
+
+    def _raw(self, direction, can_id, data, t, ext):
+        row = (round(t, 6), direction, can_id, data.hex(), 1 if ext else 0)
+        if len(self.raw_pending) < 20000:
+            self.raw_pending.append(row)
+        else:
+            self.raw_lost += 1
+        if ext and (can_id >> 8) & 0x3FF00 == j1939.PGN_ADDRESS_CLAIMED:
+            self.claims[can_id & 0xFF] = row
 
     def _frame(self, direction, can_id, data, t):
         row = (round(t, 4), direction, can_id, data.hex())
@@ -226,7 +242,8 @@ class App:
             if cf.address not in self.net.nodes and cf.address < 0xFE:
                 nodes.append({"addr": cf.address, "name": f"{cf.name:016X}", "text": name_text(cf.name), "fn": name_decode(cf.name)["function"],
                               "frames": 0, "age": 0, "own": True})
-        return {"t": "bus", "stats": self.bus.stats, "busName": self.bus.name, "nodes": nodes, "cfs": self.cf_state()}
+        return {"t": "bus", "stats": self.bus.stats, "busName": self.bus.name, "nodes": nodes, "cfs": self.cf_state(),
+                "listen": self.listen}
 
     def on_connect(self, client):
         client.send({"t": "hello", "params": PARAMS, "values": self.sim.p, "live": self.sim.live,
@@ -275,6 +292,10 @@ class App:
         if self.dirty["rx"] and n % 3 == 0:
             self.dirty["rx"] = False
             w.broadcast({"t": "rx", "rows": list(self.tractor.rx.values())})
+        if self.raw_pending or self.raw_lost:
+            w.broadcast({"t": "raw", "rows": self.raw_pending, "lost": self.raw_lost}, sub="raw")
+            self.raw_pending = []
+            self.raw_lost = 0
         if n % 3 == 1 and self.frames_pending:
             w.broadcast({"t": "frames", "rows": self.frames_pending[-600:]}, sub="frames")
             self.frames_pending = []
@@ -328,6 +349,11 @@ class App:
             (client.subs.add if m.get("on") else client.subs.discard)(m["name"])
             if m["name"] == "frames" and m.get("on"):
                 client.send({"t": "frames", "rows": list(self.frames)[-500:], "reset": True})
+            if m["name"] == "raw" and m.get("on"):  # the NAMEs first, then the recent history
+                rows = sorted(self.claims.values()) + [(t, d, i, h, 1) for t, d, i, h in self.frames]
+                client.send({"t": "raw", "rows": rows, "reset": True})
+        elif t in ("send", "request") and self.listen:
+            client.send({"t": "toast", "error": True, "text": "Luistermodus (--listen): de simulator zendt niets"})
         elif t == "send":
             can_id = int(str(m["id"]), 16)
             data = bytes.fromhex(str(m["data"]).replace(" ", ""))[:8]

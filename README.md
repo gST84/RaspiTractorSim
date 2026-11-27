@@ -25,6 +25,7 @@ daar uitgeschakeld en na herladen begint alles opnieuw. Zelf bouwen: `python3 to
 | **Tractor** | Alle gesimuleerde waarden als schuifregelaar, knop of keuzelijst; live tegels; scenario's (stilstand, transport, veldwerk, kopakker); tabel van verzonden berichten (aan/uit, interval, laatste data, "Zend"); wat werktuigen naar de tractor sturen. |
 | **Virtuele terminal** | Het scherm van de VT: werksetknoppen links, actief data- of alarmmasker, softkeys rechts (met paginering als er meer zijn dan fysieke toetsen). Klik/tik op softkeys, knoppen en invoervelden; berichtenlog; pool downloaden als `.iop`; een `.iop` openen zonder werktuig (bv. uit PLC-VT-Designer). |
 | **Bus** | Busbelasting en foutframes, alle knooppunten met gedecodeerde NAME, live CAN-log met filter, CSV-export, een frame of request zelf versturen. |
+| **Variabelen** | CAN-analyzer: de bus als boom van toestellen, berichten en signalen (zoals een OPC UA-client), attributen, volglijst met trend. Bron: de simulator, een USB- of seriële adapter rechtstreeks in de browser, of een logbestand. Zie [Variabelen](#variabelen-can-analyzer). |
 | **Instellingen** | Per ECU: aan/uit, adres, NAME. VT: versie, schermgrootte, softkeys, strenge poolcontrole. |
 
 ## Snel proberen zonder hardware (ook op een Mac of pc)
@@ -99,6 +100,65 @@ python3 tools/fake_implement.py --bus vcan0
 Zet op de pagina **Instellingen** de Tractor-ECU en de GNSS-ontvanger uit: anders zenden twee TECU's tegenstrijdige
 waarden. De VT kan blijven: kies een vrij adres en functie-instantie 1 als er al een terminal op de bus zit.
 
+Enkel meekijken (pagina **Variabelen**)? Start dan met `--listen`: geen eigen ECU's en de simulator zendt niets,
+ook niet via "Zend" op de Bus-pagina. Wie het ook op de interface wil afdwingen: `ip link set can0 type can
+bitrate 250000 listen-only on`.
+
+## Variabelen (CAN-analyzer)
+
+De pagina **Variabelen** decodeert alle frames in de browser en toont ze als adresruimte, zoals UaExpert dat doet
+voor OPC UA:
+
+```
+Bus                      frames per seconde, busbelasting
+└ F0 · Tractor ECU       herkend aan zijn NAME (een adreswissel geeft geen nieuwe boom)
+   ├ Identiteit          NAME-velden, software (FEDA), ECU-identificatie (FDC5)
+   ├ Berichten           per PGN → signalen met waarde, eenheid, status (goed, n.b., fout, verouderd)
+   ├ Procesdata          werktuigen: DDOP-elementen → DDI's (actueel en setpunt van de TC)
+   └ Diagnose            DM1: lampen en actieve storingen
+```
+
+- **Attributen**: pad, ruwe waarde, bitpositie, datatype, schaal, keuzelijst, periode, bron van de definitie.
+- **Volglijst**: `+` of dubbelklik op een variabele. Per variabele een kleine trend (30 s tot alles), CSV-export.
+  De lijst blijft bewaard in de browser.
+- **Opnemen**: alle frames als candump-log (`.log`), terug te openen als logbestand.
+- **Decoderen**: ingebouwd voor ISOBUS/J1939 (tractorberichten zoals `ISO_TractorDecode` en `ISO_TractorEcu` van
+  PLC-VT-Designer, NAME, DM1, VT-functies, NMEA 2000 met fast packet) met TP, ETP en fast packet.
+  - **DBC**: eigen DBC-bestanden gaan voor op de ingebouwde berichten (exact CAN-ID, of de PGN voor `J1939PG`).
+  - **TC-procesdata**: de DDOP wordt opgevangen als het werktuig hem naar de TC stuurt. Kwam die niet voorbij, laad
+    hem dan als bestand bij het toestel (**DDOP laden…**). Zonder DDOP krijgen DDI's een naam uit een beperkte
+    tabel (`web/can/ddi.js`).
+
+### Bronnen
+
+| Bron | Hoe | Opmerking |
+|---|---|---|
+| Simulator / server | WebSocket (`raw`) | SocketCAN, virtuele bus, of via python-can: `--bus pythoncan:pcan:PCAN_USBBUS1`, `pythoncan:kvaser:0`, `pythoncan:vector:0`, `pythoncan:ixxat:0` (`pip install python-can` en de driver van de fabrikant) |
+| USB-adapter (WebUSB) | driver in de browser | Microchip CAN BUS Analyzer, candleLight/CANable (gs_usb), PEAK PCAN-USB, PCAN-USB FD / Pro FD / X6 |
+| Seriële adapter (slcan) | WebSerial | CANable met slcan-firmware, USBtin, Lawicel en compatibele |
+| Logbestand | in één keer of afspelen (×1, ×5, ×20) | Microchip `.CAN`, candump, PCAN-View `.trc`, de CSV van de Bus-pagina |
+
+- **Browsers**: WebUSB en WebSerial werken enkel in Chrome en Edge, op `https` of `localhost`. Vanaf een andere pc
+  via `http://<pi>:8080` dus geen USB, wel de simulator/server als bron.
+- **Drivers van het besturingssysteem**: houdt een driver de adapter vast, dan kan de browser er niet bij.
+  - Windows: de PEAK-driver houdt een PCAN-USB vast. Gebruik daar `--bus pythoncan:pcan:…`.
+  - Linux: `peak_usb`, `gs_usb` en `mcba_usb` nemen de adapter als SocketCAN-interface. Gebruik daar de server.
+  - macOS: geen van deze drivers, dus WebUSB werkt.
+- **Enkel luisteren**: de analyzer zendt nooit een frame.
+  - slcan opent met `L`, candleLight en PCAN-USB FD in listen-only. PCAN-USB doet dat pas vanaf hardwarerevisie 4.
+  - De Microchip-analyzer kent geen listen-only: hij bevestigt frames (ACK), zoals elk toestel op de bus.
+- **Getest**:
+  - De protocollen volgen de Linux-drivers (`mcba_usb.c`, `gs_usb.c`, `peak_usb/`); de omzetting van USB-berichten
+    naar frames zit in de JS-tests.
+  - Op echte hardware zijn de USB- en seriële drivers **nog niet getest**.
+- **NAME's**: een Address Claimed komt enkel bij het opstarten of op verzoek. Start de analyzer dus vóór het
+  contact, of open een log van het begin; de server stuurt de laatste claim per adres mee.
+
+### Analyzer zonder simulator
+
+`python3 tools/build_demo.py --analyzer OUT` maakt een lichte pagina (±250 kB, geen Pyodide) met enkel Variabelen:
+USB, serieel en logbestanden. De Pages-build zet die naast de demo onder `/analyzer/`.
+
 ## Wat de tractor-ECU zendt
 
 Alle waarden zijn instelbaar op de Tractor-pagina; per bericht kun je het interval wijzigen of het uitzetten.
@@ -154,7 +214,7 @@ Change Attribute volgt de veldvolgorde van de objecten (niet tegen de norm gecon
 
 | Pad | Inhoud |
 |---|---|
-| `tractorsim/canbus.py` | SocketCAN (stdlib) en de virtuele UDP-bus |
+| `tractorsim/canbus.py` | SocketCAN (stdlib), de virtuele UDP-bus en python-can (optioneel) |
 | `tractorsim/j1939.py` | identifiers, NAME, address claim, requests, TP/BAM/ETP |
 | `tractorsim/tecu.py` | instelbare waarden, berichtencoders, dynamiek, werktuigcommando's |
 | `tractorsim/vt/objects.py` | object pool: definities, parser, encoder, controle |
@@ -162,5 +222,8 @@ Change Attribute volgt de veldvolgorde van de objecten (niet tegen de norm gecon
 | `tractorsim/app.py`, `web.py` | samenhang, configuratie, HTTP + WebSocket |
 | `web/` | de webinterface; `web/vt/render.js` is afgeleid van `src/render.js` van PLC-VT-Designer |
 | `tools/fake_implement.py`, `tools/demo_pool.py` | testwerktuig en zijn object pool |
+| `web/variables.js`, `web/can/` | pagina Variabelen: frames, transport (TP/ETP/fast packet), signalen, ingebouwde database, DBC, DDOP/DDI, model |
+| `web/can/sources/` | bronnen: server, WebUSB-drivers (`usb.js`), slcan (`slcan.js`), logbestanden (`logfile.js`) |
 | `tests/test_all.py` | `python3 -m unittest discover -s tests` |
+| `tests/js/` | JS-tests van de analyzer: `jsc -m tests/js/run.mjs` (macOS, JavaScriptCore) of `node tests/js/run.mjs` |
 | `deploy/` | systemd-service en installatiescript |

@@ -266,7 +266,7 @@ export class UsbSource {
     this.device = device;
     this.bitrate = bitrate;
     this.listen = opts.listen !== false;
-    this.batch = 1; // frames per send() call
+    this.batch = 8; // frames per send() call, all on the way at once (Linux: 10 to 20 transfers in flight)
     this.txCount = 0;
     this.inCount = 0; // USB transfers received (diagnosis: does the adapter talk at all?)
     this.info = USB_DEVICES.find((d) => d.vendorId === device.vendorId && d.productId === device.productId)
@@ -295,9 +295,10 @@ export class UsbSource {
   /** What to remember to find this adapter again. */
   get identity() { return { vendorId: this.device.vendorId, productId: this.device.productId, serial: this.device.serialNumber || '' }; }
 
-  /** Sends frames ({id, ext, data}) one USB transfer each, in order. */
+  /** Sends frames ({id, ext, data}), one USB transfer each. The transfers are started together and finish in
+   *  order: waiting for each one before the next limits a sending simulator to one frame per USB round trip. */
   async send(frames) {
-    for (const f of frames) await this.out(this.txEp, this.encode(f));
+    await Promise.all(frames.map((f) => this.out(this.txEp, this.encode(f))));
   }
 
   /** Opens and sets up the adapter. Every step shows in the status, so a step that hangs can be seen. Like the
@@ -457,6 +458,7 @@ export class UsbSource {
         if (r.status === 'stall') { await d.clearHalt('in', this.inEp); continue; }
         if (r.status !== 'ok' || !r.data || !r.data.byteLength) continue;
         this.inCount++;
+        this.sink.activity?.();
         const out = [];
         this.parse(bytesOf(r.data), now(), out);
         if (out.length) this.sink.frames(out);

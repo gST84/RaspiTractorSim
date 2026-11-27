@@ -19,6 +19,7 @@ await import('./test_drivers.mjs');
 await import('./test_dbc.mjs');
 await import('./test_tc.mjs');
 await import('./test_simbus.mjs');
+await import('./test_clock.mjs');
 
 const s = summary();
 out(s.fails ? `\n${s.fails} van ${s.count} tests mislukt` : `\nAlle ${s.count} JS-tests geslaagd`);

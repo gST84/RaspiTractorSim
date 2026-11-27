@@ -74,13 +74,21 @@ try {
   if (saved) { py.FS.mkdirTree('/data'); py.FS.writeFile('/data/config.json', saved); }
   py.globals.set('store_config', (text) => { try { localStorage.setItem('tractorsim.config', text); } catch { /* no storage */ } });
   py.globals.set('can_send', onBus ? (id, ext, hex) => simBus.send(id, ext, hex) : null);
+  // the waits of the simulator run on our own clock: Chrome slows down the timers of a hidden or covered page,
+  // so every event of the CAN adapter also lets the clock tick (web/can/clock.js, tractorsim/browser.py use_clock)
+  const { Clock } = await import('./can/clock.js');
+  const clock = new Clock();
+  globalThis.tractorsimClock = clock; // for diagnosis in the console
+  simBus.onActivity = () => clock.kick();
+  py.globals.set('clock_schedule', (cb, ms) => clock.schedule(cb, ms));
   let deliver = null;
   py.globals.set('post', (text) => { if (deliver) deliver(text); });
   const demo = await py.runPythonAsync(`
 import logging, sys
 sys.path[:0] = ['/app', '/app/tools']
 logging.basicConfig(level=logging.WARNING)
-from tractorsim.browser import Demo
+from tractorsim.browser import Demo, use_clock
+use_clock(clock_schedule)
 demo = Demo(post, can_send=can_send, store_config=store_config)
 await demo.start()
 demo`);

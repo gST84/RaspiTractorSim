@@ -132,7 +132,9 @@ een CAN-adapter in je computer.
 
 - De adapter opent normaal (niet listen-only), want de simulator zendt. Zit er al een tractor of terminal op de bus,
   zet dan de TECU uit en kies voor de VT een vrij adres (zie hieronder).
-- Houd het tabblad zichtbaar: de simulator draait in de pagina en de browser vertraagt tabbladen op de achtergrond.
+- Houd het tabblad open: de simulator draait in de pagina. Een verborgen of bedekt venster (bv. achter TIA Portal)
+  krijgt trage timers van de browser; de simulator tikt dan mee op elk bericht van de adapter (`web/can/clock.js`),
+  dus met een PLC op de bus houdt hij zijn ritme (VT Status elke seconde). Zonder ander verkeer valt hij dan stil.
 - Op Windows houdt de PEAK-driver een PCAN-USB vast en op Linux nemen `gs_usb`, `peak_usb` en `mcba_usb` de adapter;
   de browser kan er dan niet bij. Gebruik daar de server.
 - Het zenden is enkel getest met nagemaakte USB-berichten, nog niet met een echte adapter.

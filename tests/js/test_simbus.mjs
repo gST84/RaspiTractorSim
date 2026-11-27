@@ -169,3 +169,22 @@ await testAsync('adapter die vastloopt én niet sluit: de echte fout en het verl
     UsbSource.TIMEOUT_MS = before;
   }
 });
+
+await testAsync('USB: een groepje frames tegelijk onderweg, in volgorde (niet één per USB-rondreis)', async () => {
+  const dev = new FakeAnalyzer();
+  const src = new UsbSource(dev, 250000, { listen: false });
+  await src.open(quietSink());
+  const started = [];
+  const release = [];
+  dev.transferOut = (ep, data) => new Promise((resolve) => {
+    started.push(((data[3] << 8) | data[4]) >> 5); // 11-bit id from the SID
+    release.push(() => resolve({ status: 'ok', bytesWritten: data.length }));
+  });
+  const frames = Array.from({ length: src.batch }, (_, i) => ({ id: 0x100 + i, ext: false, data: u8(i) }));
+  const done = src.send(frames);
+  await tick();
+  eq([src.batch, started], [8, frames.map((f) => f.id)], 'alle transfers gestart vóór de eerste klaar is');
+  release.forEach((r) => r());
+  await done;
+  await src.close();
+});

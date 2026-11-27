@@ -42,7 +42,7 @@ export class SimBus {
     this.txq = [];
     this.pumping = false;
     this.manualOff = false;
-    this.st = { connected: false, connecting: false, label: '', text: '', error: '', rx: 0, tx: 0, dropped: 0, log: [] };
+    this.st = { connected: false, connecting: false, label: '', text: '', error: '', rx: 0, tx: 0, dropped: 0, log: [], txqMax: 0 };
     this.t0 = 0;
     this.fns = new Set();
   }
@@ -75,6 +75,13 @@ export class SimBus {
     if (!this.src || !this.st.connected) return 0;
     if (this.txq.length >= TX_MAX) return 2;
     this.txq.push({ id, ext: !!ext, data: bytesOf(hex) });
+    if (this.txq.length > this.st.txqMax) {
+      this.st.txqMax = this.txq.length;
+      if (this.txq.length === 100) { // the adapter sends slower than the simulator: answers come late
+        this.note('zendwachtrij 100 frames: de adapter zendt trager dan de simulator');
+        this.emit();
+      }
+    }
     this.pump();
     return 1;
   }
@@ -89,6 +96,7 @@ export class SimBus {
         try {
           await src.send(batch);
           this.st.tx += batch.length;
+          this.onActivity?.();
         } catch (e) {
           this.st.dropped += batch.length;
           this.st.error = `zenden: ${e.message || e}`;
@@ -153,6 +161,7 @@ export class SimBus {
       status: (text) => { this.st.text = text; this.note(text); this.emit(); },
       lost: () => {},
       closed: (why) => { if (this.src === src) this.lost(why); },
+      activity: () => this.onActivity?.(), // every USB/serial event: the clock of the simulator ticks
     };
     this.src = src;
     let timer;
@@ -171,7 +180,7 @@ export class SimBus {
       await closeSoon(src);
       throw new Error('verbinden afgebroken');
     }
-    Object.assign(this.st, { connected: true, label: src.label, error: '' });
+    Object.assign(this.st, { connected: true, label: src.label, error: '', txqMax: 0 });
     this.py?.state(true, src.label);
     this.emit();
   }

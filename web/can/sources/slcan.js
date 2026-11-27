@@ -128,6 +128,7 @@ export class SlcanSource {
           for (;;) {
             const { value, done } = await this.reader.read();
             if (done) break;
+            this.sink.activity?.();
             rest += dec.decode(value, { stream: true });
             const out = [];
             const t = Date.now() / 1000;

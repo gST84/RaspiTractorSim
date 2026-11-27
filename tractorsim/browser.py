@@ -20,6 +20,25 @@ from .canbus import Bus, MemoryBus
 log = logging.getLogger(__name__)
 
 
+def use_clock(timeout):
+    """Runs the waits of asyncio (asyncio.sleep, call_later) on `timeout(callback, ms)`: the clock of the page
+    (web/can/clock.js), which also ticks on every event of the CAN adapter. Pyodide schedules them with setTimeout,
+    which Chrome slows down to once a second, and after five minutes to once a minute, as soon as the window is hidden
+    or covered (e.g. by TIA Portal). The periodic messages and the VT Status would then stop and a VT client drops the
+    VT. Immediate callbacks (≤ 2 ms) keep Pyodide's own path (postMessage), which is not slowed down."""
+    from pyodide import webloop  # only in the browser
+
+    immediate = webloop.scheduleCallback
+
+    def schedule(callback, ms=0):
+        if ms <= 2:
+            immediate(callback, ms)
+        else:
+            timeout(callback, ms)
+
+    webloop.scheduleCallback = schedule
+
+
 class PageClient:
     def __init__(self, post):
         self.post = post

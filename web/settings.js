@@ -78,6 +78,7 @@ function canCard() {
     statusEl.replaceChildren(...[
       h('span', { class: 'pill ' + (st.connected ? 'ok' : st.connecting ? 'warn' : 'err') }, st.connected ? 'verbonden' : st.connecting ? 'verbinden…' : 'niet verbonden'),
       st.connected || st.connecting ? ` ${st.text}` : null,
+      st.connected && st.txqMax >= 100 ? h('div', { class: 'err small' }, `zendwachtrij liep op tot ${st.txqMax} frames: de adapter zendt trager dan de simulator, antwoorden komen te laat`) : null,
       st.error ? h('div', { class: 'err small' }, st.error) : null,
       !st.connected && !st.connecting && !st.error ? h('div', { class: 'muted small' }, hint) : null,
       st.error && st.log.length ? h('details', { class: 'small', open: true }, h('summary', null, 'Verloop'),
@@ -119,8 +120,9 @@ function canCard() {
     card.replaceChildren(...[h('h3', null, 'CAN-bus'), ...rows,
       statusEl ? h('div', { class: 'row', style: { alignItems: 'flex-start', paddingTop: '6px' } }, h('span', { class: 'lbl' }, 'Status'), statusEl) : null,
       tools ? h('div', { class: 'toolbar small' }, tools) : null,
-      !wantDemo ? h('p', { class: 'muted small' }, 'Houd dit tabblad open en zichtbaar: de simulator draait in deze pagina en op de '
-        + 'achtergrond vertraagt de browser hem. De browser onthoudt je adapter; zit hij erin, dan verbindt hij bij het openen vanzelf.') : null,
+      !wantDemo ? h('p', { class: 'muted small' }, 'Houd dit tabblad open: de simulator draait in deze pagina. Is het venster verborgen of '
+        + 'bedekt, dan vertraagt de browser zijn timers; de simulator houdt dan zijn ritme op het CAN-verkeer (een PLC op de bus volstaat). '
+        + 'De browser onthoudt je adapter; zit hij erin, dan verbindt hij bij het openen vanzelf.') : null,
     ].filter(Boolean));
     status();
   }

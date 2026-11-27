@@ -14,9 +14,11 @@ scherm (object pool) toont.
 Geen externe Python-pakketten: SocketCAN, de webserver en de WebSocket komen uit de standaardbibliotheek
 (Python 3.9 of nieuwer). Getest zonder hardware op de virtuele bus; nog **niet getest op een Pi met een echt werktuig**.
 
-**Online demo: https://gst84.github.io/RaspiTractorSim/**: dezelfde simulator met een testwerktuig, volledig in de
-browser (Python via Pyodide, ongeveer 15 MB bij de eerste keer laden). Downloads (pool, CAN-log, instellingen) zijn
-daar uitgeschakeld en na herladen begint alles opnieuw. Zelf bouwen: `python3 tools/build_demo.py` (map `dist/demo`).
+**Online versie: https://gst84.github.io/RaspiTractorSim/**: dezelfde simulator, volledig in de browser (Python via
+Pyodide, ongeveer 15 MB bij de eerste keer laden). Standaard is het een demo met een testwerktuig op een gesimuleerde
+bus; zet je op **Instellingen** de schakelaar **Demo** uit, dan draait hij op een echte bus via je CAN-adapter (zie
+[Online op een echte bus](#online-op-een-echte-bus)). Downloads (pool, CAN-log, instellingen) zijn daar uitgeschakeld;
+de instellingen blijven in de browser bewaard. Zelf bouwen: `python3 tools/build_demo.py` (map `dist/demo`).
 
 ## Pagina's
 
@@ -95,6 +97,46 @@ python3 -m tractorsim --bus vcan0 &
 python3 tools/fake_implement.py --bus vcan0
 ```
 
+### Op de Mac met een USB-adapter
+
+macOS heeft geen SocketCAN. Zonder installatie kan het met de [online versie](#online-op-een-echte-bus); met de
+server zendt de simulator via een USB-adapter, bijvoorbeeld de Microchip CAN BUS Analyzer:
+
+```bash
+brew install libusb
+python3 -m venv .venv && .venv/bin/pip install pyusb
+.venv/bin/python -m tractorsim --bus mcba
+```
+
+- Met meer analyzers: `--bus mcba:1` (volgorde vanaf 0) of `--bus mcba:<serienummer>`.
+- De afsluitweerstand blijft zoals hij in de analyzer staat; het logboek toont bij de start of hij aan of uit staat.
+- Losgekoppeld? De simulator verbindt opnieuw zodra de analyzer terug is.
+- De simulator en de pagina Variabelen (WebUSB) kunnen de analyzer niet tegelijk gebruiken: kies in Variabelen dan
+  de bron Simulator.
+- Andere adapters via python-can: `pythoncan:pcan:PCAN_USBBUS1` (met PCBUSB van MacCAN), `pythoncan:gs_usb:0`
+  (candleLight) of `pythoncan:slcan:/dev/tty.usbmodem…`.
+
+### Online op een echte bus
+
+De online versie kan zelf tractor-ECU, VT en GNSS zijn op een echte bus, zonder installatie: in Chrome of Edge, met
+een CAN-adapter in je computer.
+
+1. Zet op **Instellingen** de schakelaar **Demo** uit en klik **Toepassen**: de pagina herstart zonder testwerktuig.
+2. Kies de adapter, de bitrate (ISOBUS: 250 kbit/s) en, bij een seriële adapter, de baudrate.
+3. Klik **Verbinden…** en kies je adapter. De browser onthoudt hem: zit hij erin, dan verbindt hij bij het openen vanzelf.
+
+| Adapter | Via |
+|---|---|
+| Microchip CAN BUS Analyzer, candleLight/CANable (gs_usb), PEAK PCAN-USB, PCAN-USB FD | WebUSB |
+| CANable met slcan-firmware, USBtin, Lawicel | WebSerial (slcan) |
+
+- De adapter opent normaal (niet listen-only), want de simulator zendt. Zit er al een tractor of terminal op de bus,
+  zet dan de TECU uit en kies voor de VT een vrij adres (zie hieronder).
+- Houd het tabblad zichtbaar: de simulator draait in de pagina en de browser vertraagt tabbladen op de achtergrond.
+- Op Windows houdt de PEAK-driver een PCAN-USB vast en op Linux nemen `gs_usb`, `peak_usb` en `mcba_usb` de adapter;
+  de browser kan er dan niet bij. Gebruik daar de server.
+- Het zenden is enkel getest met nagemaakte USB-berichten, nog niet met een echte adapter.
+
 ### Op een echte tractor
 
 Zet op de pagina **Instellingen** de Tractor-ECU en de GNSS-ontvanger uit: anders zenden twee TECU's tegenstrijdige
@@ -133,7 +175,7 @@ Bus                      frames per seconde, busbelasting
 
 | Bron | Hoe | Opmerking |
 |---|---|---|
-| Simulator / server | WebSocket (`raw`) | SocketCAN, virtuele bus, of via python-can: `--bus pythoncan:pcan:PCAN_USBBUS1`, `pythoncan:kvaser:0`, `pythoncan:vector:0`, `pythoncan:ixxat:0` (`pip install python-can` en de driver van de fabrikant) |
+| Simulator / server | WebSocket (`raw`) | SocketCAN, virtuele bus, Microchip-analyzer (`--bus mcba`), of via python-can: `--bus pythoncan:pcan:PCAN_USBBUS1`, `pythoncan:kvaser:0`, `pythoncan:vector:0`, `pythoncan:ixxat:0` (`pip install python-can` en de driver van de fabrikant) |
 | USB-adapter (WebUSB) | driver in de browser | Microchip CAN BUS Analyzer, candleLight/CANable (gs_usb), PEAK PCAN-USB, PCAN-USB FD / Pro FD / X6 |
 | Seriële adapter (slcan) | WebSerial | CANable met slcan-firmware, USBtin, Lawicel en compatibele |
 | Logbestand | in één keer of afspelen (×1, ×5, ×20) | Microchip `.CAN`, candump, PCAN-View `.trc`, de CSV van de Bus-pagina |
@@ -214,7 +256,7 @@ Change Attribute volgt de veldvolgorde van de objecten (niet tegen de norm gecon
 
 | Pad | Inhoud |
 |---|---|
-| `tractorsim/canbus.py` | SocketCAN (stdlib), de virtuele UDP-bus en python-can (optioneel) |
+| `tractorsim/canbus.py` | SocketCAN (stdlib), de virtuele UDP-bus, de Microchip-analyzer via USB (pyusb, optioneel) en python-can (optioneel) |
 | `tractorsim/j1939.py` | identifiers, NAME, address claim, requests, TP/BAM/ETP |
 | `tractorsim/tecu.py` | instelbare waarden, berichtencoders, dynamiek, werktuigcommando's |
 | `tractorsim/vt/objects.py` | object pool: definities, parser, encoder, controle |
@@ -224,6 +266,7 @@ Change Attribute volgt de veldvolgorde van de objecten (niet tegen de norm gecon
 | `tools/fake_implement.py`, `tools/demo_pool.py` | testwerktuig en zijn object pool |
 | `web/variables.js`, `web/can/` | pagina Variabelen: frames, transport (TP/ETP/fast packet), signalen, ingebouwde database, DBC, DDOP/DDI, model |
 | `web/can/sources/` | bronnen: server, WebUSB-drivers (`usb.js`), slcan (`slcan.js`), logbestanden (`logfile.js`) |
+| `web/can/simbus.js`, `tractorsim/browser.py` | de online versie: demo of een echte bus via de adapter (WebUSB/WebSerial) |
 | `tests/test_all.py` | `python3 -m unittest discover -s tests` |
 | `tests/js/` | JS-tests van de analyzer: `jsc -m tests/js/run.mjs` (macOS, JavaScriptCore) of `node tests/js/run.mjs` |
 | `deploy/` | systemd-service en installatiescript |

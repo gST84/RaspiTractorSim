@@ -1,7 +1,11 @@
-// Settings page: the three simulated control functions (tractor ECU, virtual terminal, GNSS).
-import { h, hex, send, on } from './util.js';
+// Settings page: the three simulated control functions (tractor ECU, virtual terminal, GNSS) and, in the online
+// version, the CAN bus: the demo bus or a CAN adapter of this computer (web/can/simbus.js).
+import { h, hex, send, on, isDemo } from './util.js';
+import { simBus, BITRATES, BAUDS } from './can/simbus.js';
+import { usbAvailable } from './can/sources/usb.js';
+import { serialAvailable } from './can/sources/slcan.js';
 
-let root;
+let root, busCard = null;
 const FIELDS = [
   ['enabled', 'Ingeschakeld', 'bool'],
   ['address', 'Voorkeursadres', 'hex', 'bv. F0 voor de TECU, 26 voor de eerste VT'],
@@ -32,11 +36,96 @@ function render(cfg, busSpec) {
       'zet de Tractor-ECU (en de GNSS-ontvanger) uit, anders spreken twee TECU’s elkaar tegen. ',
       'De VT kan wel blijven: kies dan een vrij adres en functie-instantie 1 als er al een terminal is.'),
     h('div', { class: 'grid' },
+      isDemo() ? (busCard ||= canCard()) : null,
       ['tecu', 'vt', 'gnss'].map((key) => section(key, cfg[key])),
-      h('section', { class: 'card' }, h('h3', null, 'Systeem'),
+      isDemo() ? null : h('section', { class: 'card' }, h('h3', null, 'Systeem'),
         h('dl', null, h('dt', null, 'CAN-interface'), h('dd', { class: 'mono' }, busSpec),
           h('dt', null, 'Bitrate'), h('dd', null, 'ISOBUS: 250 kbit/s, in te stellen met ', h('code', null, 'ip link'), ' (zie README)')),
         h('div', { class: 'toolbar small' }, h('a', { class: 'btn ghost api-dl', href: '/api/config', download: '' }, 'Instellingen downloaden')))));
+}
+
+const DEMO_TEXT = 'Alles draait in deze browser: tractor-ECU, VT, GNSS en een testwerktuig op een gesimuleerde CAN-bus.';
+const BUS_TEXT = 'De simulator draait in deze browser en zendt en ontvangt via je CAN-adapter: tractor-ECU, VT en GNSS op '
+  + 'een echte bus, zonder testwerktuig.';
+const KINDS = [
+  ['usb', 'USB: Microchip CAN BUS Analyzer, candleLight, PCAN-USB', usbAvailable],
+  ['serial', 'Serieel (slcan): CANable, USBtin, Lawicel', serialAvailable],
+];
+
+/** Online version: demo bus or the CAN adapter (switching restarts the page; the adapter connects live). */
+function canCard() {
+  const card = h('section', { class: 'card' });
+  const onBus = simBus.active; // what this page runs now
+  let wantDemo = !onBus;
+  let statusEl, connectBtn, offBtn;
+
+  const select = (label, value, options, onchange, hint) => {
+    const sel = h('select', { onchange: () => onchange(sel.value) },
+      options.map(([v, text, ok]) => h('option', { value: v, disabled: ok && !ok() }, text)));
+    sel.value = String(value);
+    return h('label', { class: 'row', title: hint || '' }, h('span', { class: 'lbl' }, label), sel);
+  };
+  const change = (patch) => {
+    simBus.save(patch);
+    draw();
+    if (onBus && (simBus.st.connected || patch.kind)) simBus.connect(false); // same adapter, new settings
+  };
+
+  function status() {
+    if (!statusEl) return;
+    const st = simBus.st;
+    const hint = st.text && st.text !== 'niet verbonden' ? st.text : 'Klik op Verbinden en kies je adapter.';
+    statusEl.replaceChildren(...[
+      h('span', { class: 'pill ' + (st.connected ? 'ok' : st.connecting ? 'warn' : 'err') }, st.connected ? 'verbonden' : st.connecting ? 'verbinden…' : 'niet verbonden'),
+      st.connected || st.connecting ? ` ${st.text}` : null,
+      st.error ? h('div', { class: 'err small' }, st.error) : null,
+      !st.connected && !st.connecting && !st.error ? h('div', { class: 'muted small' }, hint) : null,
+    ].filter(Boolean));
+    if (connectBtn) connectBtn.disabled = st.connecting;
+    if (offBtn) offBtn.disabled = !st.connected;
+  }
+
+  function draw() {
+    const c = simBus.cfg;
+    const demoBox = h('input', { type: 'checkbox', checked: wantDemo, onchange: (e) => { wantDemo = e.target.checked; draw(); } });
+    const rows = [
+      h('label', { class: 'row toggle', title: 'Aan: gesimuleerde bus met testwerktuig. Uit: een echte CAN-bus via je adapter.' },
+        h('span', { class: 'lbl' }, 'Demo'), h('span', { class: 'switch' }, demoBox, h('i'))),
+      h('p', { class: 'muted small' }, wantDemo ? DEMO_TEXT : BUS_TEXT),
+    ];
+    if (!wantDemo) {
+      if (!usbAvailable() && !serialAvailable()) {
+        rows.push(h('p', { class: 'err small' }, 'Deze browser kent geen WebUSB of WebSerial: gebruik Chrome of Edge (op https of localhost).'));
+      }
+      rows.push(
+        select('Adapter', c.kind, KINDS, (v) => change({ kind: v, device: null })),
+        select('Bitrate', c.bitrate, BITRATES.map((b) => [b, `${b / 1000} kbit/s`]), (v) => change({ bitrate: Number(v) }), 'ISOBUS: 250 kbit/s'),
+        c.kind === 'serial' ? select('Baudrate (serieel)', c.baud, BAUDS.map((b) => [b, String(b)]), (v) => change({ baud: Number(v) }),
+          'snelheid van de seriële lijn; een CANable via USB negeert ze') : null);
+    }
+    statusEl = connectBtn = offBtn = null;
+    let tools;
+    if (wantDemo === onBus) { // switch changed: restart in the other mode
+      tools = [h('button', { class: 'btn primary', onclick: () => { simBus.save({ demo: wantDemo }); location.reload(); } }, 'Toepassen'),
+        h('span', { class: 'muted small' }, 'herstart de pagina')];
+    } else if (onBus) {
+      connectBtn = h('button', { class: 'btn primary', onclick: () => simBus.connect(true) }, 'Verbinden…');
+      offBtn = h('button', { class: 'btn ghost', onclick: () => simBus.disconnect() }, 'Verbreken');
+      tools = [connectBtn, offBtn];
+      statusEl = h('div', { class: 'small', role: 'status' });
+    }
+    card.replaceChildren(...[h('h3', null, 'CAN-bus'), ...rows,
+      statusEl ? h('div', { class: 'row' }, h('span', { class: 'lbl' }, 'Status'), statusEl) : null,
+      tools ? h('div', { class: 'toolbar small' }, tools) : null,
+      !wantDemo ? h('p', { class: 'muted small' }, 'Houd dit tabblad open en zichtbaar: de simulator draait in deze pagina en op de '
+        + 'achtergrond vertraagt de browser hem. De browser onthoudt je adapter; zit hij erin, dan verbindt hij bij het openen vanzelf.') : null,
+    ].filter(Boolean));
+    status();
+  }
+
+  simBus.onChange(status);
+  draw();
+  return card;
 }
 
 function section(key, c) {

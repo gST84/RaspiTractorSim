@@ -17,6 +17,18 @@ export function test(name, fn) {
   }
 }
 
+/** For tests that wait on promises: `await testAsync(name, async () => …)`. */
+export async function testAsync(name, fn) {
+  count++;
+  try {
+    await fn();
+    out(`  ok   ${name}`);
+  } catch (e) {
+    fails++;
+    out(`  FOUT ${name}: ${e && e.message ? e.message : e}`);
+  }
+}
+
 export function eq(got, want, what = '') {
   const g = JSON.stringify(got, (k, v) => (typeof v === 'bigint' ? `${v}n` : v instanceof Uint8Array ? Array.from(v) : v));
   const w = JSON.stringify(want, (k, v) => (typeof v === 'bigint' ? `${v}n` : v instanceof Uint8Array ? Array.from(v) : v));

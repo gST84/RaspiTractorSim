@@ -48,9 +48,10 @@ def cf_name(c):
 
 
 class App:
-    def __init__(self, bus_spec, data_dir, web_dir, host, port, bitrate=250000, web=None, listen=False):
+    def __init__(self, bus_spec, data_dir, web_dir, host, port, bitrate=250000, web=None, listen=False, bus=None):
         """`web` replaces the HTTP/WebSocket server (the browser demo passes its own link to the page).
-        `listen`: analyzer only (--listen): no control functions and nothing is ever sent on the bus."""
+        `listen`: analyzer only (--listen): no control functions and nothing is ever sent on the bus.
+        `bus`: a ready bus instead of opening `bus_spec` (the online version on the page's CAN adapter)."""
         self.bus_spec = bus_spec
         self.data_dir = data_dir
         self.cfg_path = os.path.join(data_dir, "config.json")
@@ -58,7 +59,7 @@ class App:
         self.cfg = self._load()
         self.bitrate = bitrate
         self.listen = listen
-        self.bus = open_bus(bus_spec, bitrate, listen)
+        self.bus = bus if bus is not None else open_bus(bus_spec, bitrate, listen)
         self.bus.listen_only = listen
         self.net = Network(self.bus)
         self.sim = Sim(self.cfg.get("params"))
@@ -79,6 +80,7 @@ class App:
         self.dirty = {"params": set(), "vt": False, "rx": False}
         self.dirty_objs = {}
         self._save_at = None
+        self.on_saved = None  # callable(config text) after every save (the online version keeps it in the browser)
         self.bus.listeners.append(lambda i, d, t: self._frame("rx", i, d, t))
         self.bus.tx_listeners.append(lambda i, d, t: self._frame("tx", i, d, t))
         self.bus.raw_listeners.append(self._raw)
@@ -109,6 +111,11 @@ class App:
         with open(tmp, "w") as fh:
             json.dump(self.cfg, fh, indent=1)
         os.replace(tmp, self.cfg_path)
+        if self.on_saved:
+            try:
+                self.on_saved(json.dumps(self.cfg))
+            except Exception:
+                log.exception("instellingen bewaren in de browser")
 
     # ------------------------------------------------------------ start / restart
     async def start(self):

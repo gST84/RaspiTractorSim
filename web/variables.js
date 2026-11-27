@@ -11,6 +11,7 @@ import { LogSource, toCandump } from './can/sources/logfile.js';
 import { ServerSource } from './can/sources/server.js';
 import { UsbSource, usbAvailable } from './can/sources/usb.js';
 import { SlcanSource, serialAvailable } from './can/sources/slcan.js';
+import { simBus } from './can/simbus.js';
 import { parseDbc, loadStored, saveStored, deleteStored } from './can/dbc.js';
 import { TcPlugin } from './can/tc.js';
 
@@ -41,12 +42,14 @@ function bitrateOptions() {
   return [sel];
 }
 
+// In the online version on a real bus the simulator holds the adapter: its frames come in through 'server'.
+const ownAdapter = () => !simBus.active;
 addSource({
-  key: 'usb', label: 'USB-adapter (WebUSB)', live: true, available: usbAvailable, options: bitrateOptions, bitrate,
+  key: 'usb', label: 'USB-adapter (WebUSB)', live: true, available: () => usbAvailable() && ownAdapter(), options: bitrateOptions, bitrate,
   make: () => UsbSource.request(bitrate()),
 });
 addSource({
-  key: 'serial', label: 'Seriële adapter (slcan)', live: true, available: serialAvailable, options: bitrateOptions, bitrate,
+  key: 'serial', label: 'Seriële adapter (slcan)', live: true, available: () => serialAvailable() && ownAdapter(), options: bitrateOptions, bitrate,
   make: () => SlcanSource.request(bitrate()),
 });
 

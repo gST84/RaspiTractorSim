@@ -1,5 +1,6 @@
-// CAN adapters straight from the browser over WebUSB (Chrome / Edge, on localhost or https). Receive only:
-// the analyzer never sends a CAN frame. The protocols follow the Linux drivers:
+// CAN adapters straight from the browser over WebUSB (Chrome / Edge, on localhost or https). The analyzer
+// (page Variabelen) opens them listen-only and never sends; the online simulator (can/simbus.js) opens them
+// normally (`{ listen: false }`) and sends with send(frames). The protocols follow the Linux drivers:
 //   Microchip CAN BUS Analyzer   drivers/net/can/usb/mcba_usb.c          (no listen-only: the analyzer ACKs frames)
 //   candleLight / CANable gs_usb drivers/net/can/usb/gs_usb.c            (listen-only when the firmware offers it)
 //   PEAK PCAN-USB                drivers/net/can/usb/peak_usb/pcan_usb.c (listen-only from hardware revision 4)
@@ -35,7 +36,7 @@ const now = () => Date.now() / 1000;
 const bytesOf = (dv) => new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
 
 // ---------------------------------------------------------------- Microchip CAN BUS Analyzer (19-byte messages)
-export const MCBA = { RX: 0xe3, TX_RSP: 0xe2, KA_CAN: 0xf5, KA_USB: 0xf7, NOTHING: 0xff, BITRATE: 0xa1, TERMINATION: 0xa8, FW: 0xa9 };
+export const MCBA = { RX: 0xe3, TX: 0xa3, TX_RSP: 0xe2, KA_CAN: 0xf5, KA_USB: 0xf7, NOTHING: 0xff, BITRATE: 0xa1, TERMINATION: 0xa8, FW: 0xa9 };
 
 /** Parses a USB transfer of 19-byte messages: CAN frames into `out`, keep-alive data into `st`. */
 export function mcbaParse(buf, t, out, st) {
@@ -68,16 +69,20 @@ export function mcbaCommand(cmd, ...args) {
   return b;
 }
 
-/** For tests: a received frame as the analyzer sends it. */
-export function mcbaEncodeRx(id, ext, data) {
+/** A frame as the analyzer's 19-byte message: 0xA3 to send it, 0xE3 as the analyzer reports a received one. */
+export function mcbaEncode(id, ext, data, cmd = MCBA.TX) {
   const b = new Uint8Array(19);
-  b[0] = MCBA.RX;
+  b[0] = cmd;
+  data = data.slice(0, 8);
   let sid, eid = 0;
   if (ext) { sid = ((id >>> 13) & 0xffe0) | 0x08 | ((id >>> 16) & 3); eid = id & 0xffff; } else sid = (id << 5) & 0xffe0;
   b[1] = eid >> 8; b[2] = eid & 0xff; b[3] = sid >> 8; b[4] = sid & 0xff; b[5] = data.length;
   b.set(data, 6);
   return b;
 }
+
+/** For tests: a received frame as the analyzer sends it. */
+export const mcbaEncodeRx = (id, ext, data) => mcbaEncode(id, ext, data, MCBA.RX);
 
 // ---------------------------------------------------------------- gs_usb (candleLight)
 export const GS = { HOST_FORMAT: 0, BITTIMING: 1, MODE: 2, BT_CONST: 4, DEVICE_CONFIG: 5, LISTEN_ONLY: 1, RX: 0xffffffff };
@@ -91,6 +96,18 @@ export function gsParse(buf, t, st) {
   if (canId & 0x40000000) return null; // remote frame
   const ext = !!(canId & 0x80000000);
   return frame(t, ext ? canId & 0x1fffffff : canId & 0x7ff, buf.slice(12, 12 + Math.min(buf[8], 8)), ext);
+}
+
+/** A frame to send (gs_host_frame, 20 bytes). The adapter echoes it with the same echo_id once it is on the bus. */
+export function gsEncode(id, ext, data, echoId = 0) {
+  const b = new Uint8Array(20);
+  const dv = new DataView(b.buffer);
+  const len = Math.min(data.length, 8);
+  dv.setUint32(0, echoId >>> 0, true);
+  dv.setUint32(4, ext ? ((id & 0x1fffffff) | 0x80000000) >>> 0 : id & 0x7ff, true);
+  b[8] = len; // can_dlc; channel 0, flags 0
+  b.set(data.slice(0, len), 12);
+  return b;
 }
 
 /** Bit timing for `bitrate` with the controller's limits: sample point 87,5 %, 8..25 time quanta, closest to 16. */
@@ -147,6 +164,21 @@ export function pcanParse(buf, t, out, st) {
   }
 }
 
+/** A frame to send: one 64-byte buffer for EP 2 (pcan_usb_encode_msg): type 2, one record, counter in the last byte. */
+export function pcanEncode(id, ext, data, counter = 0) {
+  const b = new Uint8Array(64);
+  const dv = new DataView(b.buffer);
+  const len = Math.min(data.length, 8);
+  b[0] = 2; // PCAN_USB_MSG_TX_CAN
+  b[1] = 1; // one frame
+  b[2] = len | (ext ? 0x20 : 0); // status/length
+  let p = 3;
+  if (ext) { dv.setUint32(p, ((id & 0x1fffffff) << 3) >>> 0, true); p += 4; } else { dv.setUint16(p, (id & 0x7ff) << 5, true); p += 2; }
+  b.set(data.slice(0, len), p);
+  b[63] = counter & 0xff;
+  return b;
+}
+
 // ---------------------------------------------------------------- PCAN-USB FD (uCAN)
 const UCAN = { RESET: 0x001, NORMAL: 0x002, LISTEN: 0x003, TIMING_SLOW: 0x004, FILTER_STD: 0x008, WR_ERR_CNT: 0x00a, SET_EN_OPTION: 0x00b, CLK_SET: 0x080 };
 const FD_LEN = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64];
@@ -170,6 +202,21 @@ export function pcanFdParse(buf, t, out, st) {
     else if (type === 0x0101) st.lost = (st.lost || 0) + 1; // overrun
     p += size;
   }
+}
+
+/** A classic frame to send (pucan_tx_msg, 20-byte header, 32-bit aligned), closed by a record of size 0. */
+export function pcanFdEncode(id, ext, data, ch = 0) {
+  const len = Math.min(data.length, 8);
+  const size = (20 + len + 3) & ~3;
+  const b = new Uint8Array(size + 4);
+  const dv = new DataView(b.buffer);
+  dv.setUint16(0, size, true);
+  dv.setUint16(2, 0x1000, true); // PUCAN_MSG_CAN_TX
+  b[12] = (ch & 0x0f) | (len << 4); // channel_dlc
+  dv.setUint16(14, ext ? 0x02 : 0, true); // flags: PUCAN_MSG_EXT_ID
+  dv.setUint32(16, ext ? id & 0x1fffffff : id & 0x7ff, true);
+  b.set(data.slice(0, len), 20);
+  return b;
 }
 
 const op = (code, ch = 0) => [((ch << 12) | (code & 0x3ff)) & 0xff, ((ch << 12) | (code & 0x3ff)) >> 8];
@@ -199,11 +246,17 @@ function endpoints(device) {
   throw new Error('geen bulk-endpoints gevonden');
 }
 
+const supported = (d) => USB_DEVICES.find((u) => u.vendorId === d.vendorId && u.productId === d.productId);
+
 export class UsbSource {
-  constructor(device, bitrate) {
+  /** opts.listen (default true): listen-only where the adapter can; false for the simulator, which sends. */
+  constructor(device, bitrate, opts = {}) {
     this.kind = 'usb';
     this.device = device;
     this.bitrate = bitrate;
+    this.listen = opts.listen !== false;
+    this.batch = 1; // frames per send() call
+    this.txCount = 0;
     this.info = USB_DEVICES.find((d) => d.vendorId === device.vendorId && d.productId === device.productId)
       || { name: device.productName || 'USB-adapter', driver: null };
     this.st = {};
@@ -213,9 +266,26 @@ export class UsbSource {
 
   get label() { return this.info.name; }
 
-  static async request(bitrate) {
+  static async request(bitrate, opts) {
     const device = await navigator.usb.requestDevice({ filters: USB_DEVICES.map(({ vendorId, productId }) => ({ vendorId, productId })) });
-    return new UsbSource(device, bitrate);
+    return new UsbSource(device, bitrate, opts);
+  }
+
+  /** An adapter this site may already use (no chooser, no click needed): the remembered one, else the first. */
+  static async allowed(remember, bitrate, opts) {
+    const list = (await navigator.usb.getDevices()).filter(supported);
+    const same = (d) => remember && d.vendorId === remember.vendorId && d.productId === remember.productId
+      && (!remember.serial || d.serialNumber === remember.serial);
+    const device = list.find(same) || list[0];
+    return device ? new UsbSource(device, bitrate, opts) : null;
+  }
+
+  /** What to remember to find this adapter again. */
+  get identity() { return { vendorId: this.device.vendorId, productId: this.device.productId, serial: this.device.serialNumber || '' }; }
+
+  /** Sends frames ({id, ext, data}) one USB transfer each, in order. */
+  async send(frames) {
+    for (const f of frames) await this.out(this.txEp, this.encode(f));
   }
 
   async open(sink) {
@@ -247,7 +317,9 @@ export class UsbSource {
     await this.out(this.outEp, mcbaCommand(MCBA.FW, 1));
     await this.out(this.outEp, mcbaCommand(MCBA.FW, 2));
     this.parse = (buf, t, out) => mcbaParse(buf, t, out, this.st);
-    return 'geen listen-only: de analyzer bevestigt frames (ACK), maar zendt niets';
+    this.txEp = this.outEp;
+    this.encode = (f) => mcbaEncode(f.id, f.ext, f.data);
+    return this.listen ? 'geen listen-only: de analyzer bevestigt frames (ACK), maar zendt niets' : '';
   }
 
   async ctrlOut(request, value, data) {
@@ -271,11 +343,14 @@ export class UsbSource {
       brpMin: le32(bt, 28), brpMax: le32(bt, 32), brpInc: le32(bt, 36) || 1 });
     await this.ctrlOut(GS.MODE, 0, u32le(0, 0)); // reset
     await this.ctrlOut(GS.BITTIMING, 0, u32le(1, tm.tseg1 - 1, tm.tseg2, tm.sjw, tm.brp)); // prop_seg, phase_seg1, phase_seg2, sjw, brp
-    const listen = !!(feature & GS.LISTEN_ONLY);
+    const listen = this.listen && !!(feature & GS.LISTEN_ONLY);
     await this.ctrlOut(GS.MODE, 0, u32le(1, listen ? GS.LISTEN_ONLY : 0)); // start
     this.stopCmd = () => this.ctrlOut(GS.MODE, 0, u32le(0, 0));
     this.parse = (buf, t, out) => { const f = gsParse(buf, t, this.st); if (f) out.push(f); };
-    return `${cfg[3] + 1} kanaal/kanalen, klok ${fclk / 1e6} MHz, ${listen ? 'listen-only' : 'geen listen-only in deze firmware: de adapter bevestigt frames (ACK)'}`;
+    this.txEp = this.outEp;
+    this.encode = (f) => gsEncode(f.id, f.ext, f.data, this.txCount++ % 10);
+    const mode = !this.listen ? '' : listen ? ', listen-only' : ', geen listen-only in deze firmware: de adapter bevestigt frames (ACK)';
+    return `${cfg[3] + 1} kanaal/kanalen, klok ${fclk / 1e6} MHz${mode}`;
   }
 
   async startPcan() {
@@ -288,13 +363,16 @@ export class UsbSource {
     await cmd(1, 2, [btr[1], btr[0]]); // bitrate: BTR1, BTR0
     await cmd(11, 2, [0x06]); // report rx/tx error counters
     const rev = this.device.deviceVersionMajor;
-    const silent = rev > 3;
+    const silent = this.listen && rev > 3;
     if (silent) await cmd(3, 3, [1]); // listen-only
     await cmd(10, 2, [0]); // no external 5 V
     await cmd(3, 2, [1]); // bus on
     await sleep(10);
     this.stopCmd = () => cmd(3, 2, [0]);
     this.parse = (buf, t, out) => pcanParse(buf, t, out, this.st);
+    this.txEp = 2; // messages out
+    this.encode = (f) => pcanEncode(f.id, f.ext, f.data, this.txCount++);
+    if (!this.listen) return '';
     return silent ? 'listen-only' : `hardware-revisie ${rev}: geen listen-only, de adapter bevestigt frames (ACK)`;
   }
 
@@ -316,11 +394,13 @@ export class UsbSource {
     await send([
       [...op(UCAN.SET_EN_OPTION), 0x01, 0x00, 0, 0, 0x00, 0x80], // error messages + USB calibration
       [...op(UCAN.WR_ERR_CNT), 0x00, 0xc0, 0, 0, 0, 0], // reset both error counters
-      [...op(UCAN.LISTEN), 0, 0, 0, 0, 0, 0], // operational, listen-only
+      [...op(this.listen ? UCAN.LISTEN : UCAN.NORMAL), 0, 0, 0, 0, 0, 0], // operational: listen-only or normal
     ]);
     this.stopCmd = async () => { await send([[...op(UCAN.RESET), 0, 0, 0, 0, 0, 0]]); await drvLoaded(false); };
     this.parse = (buf, t, out) => pcanFdParse(buf, t, out, this.st);
-    return 'listen-only';
+    this.txEp = 2; // messages out (PCAN_USBPRO_EP_MSGOUT_0)
+    this.encode = (f) => pcanFdEncode(f.id, f.ext, f.data);
+    return this.listen ? 'listen-only' : '';
   }
 
   async readLoop() {

@@ -1,6 +1,7 @@
 """Tests without hardware:  python3 -m unittest discover -s tests -v"""
 import asyncio
 import base64
+import errno
 import os
 import struct
 import sys
@@ -377,6 +378,173 @@ class TestAnalyzer(unittest.TestCase):
         except ImportError:
             with self.assertRaises(RuntimeError):
                 open_bus("pythoncan:pcan:PCAN_USBBUS1")
+
+
+class FakeMcbaLink:
+    """A Microchip CAN BUS Analyzer as McbaBus sees it: write(msg), read(timeout_ms), close()."""
+
+    def __init__(self):
+        import queue
+        self.written = []
+        self.inbox = queue.Queue()
+        self.fail = None
+        self.closed = False
+
+    def write(self, msg, timeout_ms=1000):
+        self.written.append(bytes(msg))
+
+    def read(self, timeout_ms):
+        import queue
+        if self.fail:
+            raise self.fail
+        try:
+            return self.inbox.get(timeout=timeout_ms / 1000)
+        except queue.Empty:
+            return b""
+
+    def close(self):
+        self.closed = True
+
+
+class TestMcba(unittest.TestCase):
+    """Microchip CAN BUS Analyzer over USB (--bus mcba), with a made-up analyzer: the byte layout of mcba_usb.c."""
+
+    def test_codec(self):
+        from tractorsim.canbus import MCBA_KA_CAN, MCBA_RX, mcba_command, mcba_decode, mcba_encode
+        tx = mcba_encode(0x18FEF100, b"\x01\x02")
+        self.assertEqual(tx.hex(), "a3f100c7ea02" + "0102" + "00" * 11)  # SID C7EA: id 28-18, 0x08, id 17-16
+        self.assertEqual(len(mcba_encode(0x123, b"\xaa", ext=False)), 19)
+        rx = (mcba_encode(0x18FEF100, b"\x01\x02", cmd=MCBA_RX) + mcba_encode(0x123, b"\xaa", ext=False, cmd=MCBA_RX)
+              + mcba_command(MCBA_KA_CAN, 3, 130, 0, 0, 0, 250, 0, 0, 0, 2, 5))
+        self.assertEqual(mcba_decode(rx), [
+            ("frame", 0x18FEF100, b"\x01\x02", True), ("frame", 0x123, b"\xaa", False),
+            ("ka_can", {"txErr": 3, "rxErr": 130, "rxOverflow": 0, "busOff": 0, "kbps": 250, "fw": "2.5"})])
+        remote = bytearray(mcba_encode(0x18EA00F0, b"", cmd=MCBA_RX))
+        remote[5] |= 0x40
+        self.assertEqual(mcba_decode(bytes(remote)), [])
+
+    def test_bus(self):
+        from tractorsim.canbus import MCBA_KA_CAN, MCBA_RX, McbaBus, mcba_command, mcba_encode
+        links = [FakeMcbaLink()]
+
+        def plug():
+            if links[-1].fail:
+                raise RuntimeError("geen Microchip CAN BUS Analyzer gevonden")
+            return links[-1]
+
+        bus = McbaBus("", 250000, link_factory=plug)
+        bus.RECONNECT_S = 0.05
+        got, raw = [], []
+        bus.listeners.append(lambda i, d, t: got.append((i, d)))
+        bus.raw_listeners.append(lambda direction, i, d, t, ext: raw.append((direction, i, ext)))
+        init = [mcba_command(0xA1, 0x00, 0xFA), mcba_command(0xA9, 1), mcba_command(0xA9, 2)]
+
+        async def go():
+            await bus.start()
+            try:
+                self.assertEqual(links[0].written, init)  # 250 kbit/s, firmware versions
+                links[0].inbox.put(mcba_encode(0x18FEF100, b"\x01\x02", cmd=MCBA_RX)
+                                   + mcba_encode(0x123, b"\xaa", ext=False, cmd=MCBA_RX))
+                bus.send(0x0CFE4980, b"\x11" * 8)
+                await asyncio.sleep(0.3)
+                self.assertEqual(got, [(0x18FEF100, b"\x01\x02")])  # 11-bit only for the analyzer
+                self.assertIn(("rx", 0x123, False), raw)
+                self.assertEqual(links[0].written[-1], mcba_encode(0x0CFE4980, b"\x11" * 8))
+                links[0].inbox.put(mcba_command(MCBA_KA_CAN, 0, 0, 0, 1, 0, 250))
+                await asyncio.sleep(0.3)
+                self.assertTrue(bus.stats["lastError"].startswith("bus-off"), bus.stats["lastError"])
+                # unplugged: sending is refused, then the analyzer comes back
+                links[0].fail = OSError(errno.ENODEV, "No such device")
+                await asyncio.sleep(0.3)
+                self.assertIsNone(bus.link)
+                self.assertIn("losgekoppeld", bus.stats["lastError"])
+                dropped = bus.stats["txDropped"]
+                bus.send(0x0CFE4980, b"\x22" * 8)
+                self.assertEqual(bus.stats["txDropped"], dropped + 1)
+                links.append(FakeMcbaLink())
+                await asyncio.sleep(0.4)
+                self.assertIs(bus.link, links[1])
+                self.assertEqual((links[1].written, bus.stats["lastError"], links[0].closed), (init, "", True))
+            finally:
+                bus.close()
+            self.assertTrue(links[1].closed)
+            self.assertFalse(any(th.is_alive() for th in bus._threads))
+
+        run(go())
+
+    def test_listen_and_spec(self):
+        from tractorsim.canbus import McbaBus, open_bus
+        link = FakeMcbaLink()
+        bus = McbaBus("", 500000, link_factory=lambda: link)
+        bus.listen_only = True
+
+        async def go():
+            await bus.start()
+            try:
+                bus.send(0x0CFE4980, b"\x11" * 8)
+                await asyncio.sleep(0.2)
+            finally:
+                bus.close()
+
+        run(go())
+        self.assertEqual([m[0] for m in link.written], [0xA1, 0xA9, 0xA9])  # only the setup, no frame
+        self.assertEqual(link.written[0][1:3], b"\x01\xf4")  # 500 kbit/s
+        self.assertEqual((open_bus("mcba").select, open_bus("mcba:A1B2").select), ("", "A1B2"))
+        try:
+            import usb.core  # noqa: F401
+        except ImportError:
+            with self.assertRaises(RuntimeError):
+                run(open_bus("mcba").start())
+
+
+class TestOnlineAdapter(unittest.TestCase):
+    """The online version (tractorsim/browser.py) on the page's CAN adapter instead of the demo bus."""
+
+    def test_adapter_mode(self):
+        import json
+        from tractorsim.browser import Demo
+        sent, posted, stored = [], [], []
+        reply = {"code": 0}  # 0: no adapter, 1: queued, 2: queue full
+
+        def can_send(can_id, ext, hx):
+            if reply["code"] == 1:
+                sent.append((can_id, ext, hx))
+            return reply["code"]
+
+        async def go():
+            demo = Demo(posted.append, tempfile.mkdtemp(), can_send=can_send, store_config=stored.append)
+            await demo.start()
+            await asyncio.sleep(0.4)
+            self.assertIsNone(demo.implement)  # no demo implement on a real bus
+            self.assertEqual(sent, [])
+            self.assertGreater(demo.bus.stats["txDropped"], 0)  # no adapter yet: dropped, not queued
+            reply["code"] = 1
+            demo.bus_state(True, "Microchip CAN BUS Analyzer · 250 kbit/s")
+            self.assertIn("Microchip", demo.bus.name)
+            await asyncio.sleep(0.6)
+            claimed = {i & 0xFF for i, ext, hx in sent if (i >> 16) & 0xFF == 0xEE}
+            self.assertIn(0xF0, claimed)  # the tractor ECU claims its address on the real bus
+            rx = demo.bus.stats["rx"]
+            demo.bus_rx(json.dumps([[0x18EAFFFE, 1, "00ee00"], [0x123, 0, "aa"]]))
+            self.assertEqual(demo.bus.stats["rx"], rx + 2)
+            reply["code"] = 2  # queue of the page full: the frame waits in the Bus
+            demo.bus.send(0x18FF00F0, b"\x01")
+            self.assertTrue(demo.bus._txq)
+            reply["code"] = 1
+            await asyncio.sleep(0.1)
+            self.assertIn((0x18FF00F0, 1, "01"), sent)
+            demo.bus_state(False)
+            self.assertEqual(demo.bus.name, "geen CAN-adapter verbonden")
+            demo.receive(json.dumps({"t": "cf", "key": "gnss", "values": {"enabled": False}}))
+            self.assertFalse(json.loads(stored[-1])["cf"]["gnss"]["enabled"])  # kept in the browser
+
+        run(go())
+
+    def test_demo_mode_unchanged(self):
+        from tractorsim.browser import Demo
+        demo = Demo(lambda t: None, tempfile.mkdtemp())
+        self.assertIsNone(demo.bus)
+        self.assertEqual(demo.app.bus_spec, "memory")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Builds the online demo: the simulator and the demo implement run in the browser (Pyodide), no Pi needed.
+"""Builds the online version: the simulator runs in the browser (Pyodide), no Pi needed. On the page Instellingen
+it runs either on a simulated bus with the demo implement (default) or on a real bus through a USB or serial CAN
+adapter of the computer (WebUSB / WebSerial, web/can/simbus.js).
 
     python3 tools/build_demo.py [OUT]              # default: dist/demo (GitHub Pages: .github/workflows/pages.yml)
     python3 tools/build_demo.py --fragment OUT     # page without <html>/<head>/<body>, for a host that adds them
@@ -31,13 +33,22 @@ BOOT = """
   <div class="boot-card">
     <b>RaspiTractorSim wordt gestart</b>
     <p id="boot-step">Python laden (ongeveer 12 MB, de eerste keer)…</p>
-    <p class="muted">Tractor-ECU, virtuele terminal, GNSS en een testwerktuig draaien hier in je browser op een
+    <p class="muted" id="boot-what">Tractor-ECU, virtuele terminal, GNSS en een testwerktuig draaien hier in je browser op een
     gesimuleerde CAN-bus. Op een Raspberry Pi met CAN-HAT praat dezelfde code met een echt werktuig.</p>
   </div>
 </div>
 <script type="module">
 const step = (t) => { document.getElementById('boot-step').textContent = t; };
 try {
+  // demo bus or a real bus through the CAN adapter of this computer (page Instellingen, stored in this browser)
+  const { simBus } = await import('./can/simbus.js');
+  const onBus = !simBus.cfg.demo;
+  if (onBus) {
+    document.getElementById('boot-what').textContent = 'Tractor-ECU, virtuele terminal en GNSS draaien hier in je browser '
+      + 'en praten via je CAN-adapter met een echte bus. Terug naar de demo: pagina Instellingen.';
+    const badge = document.querySelector('.demo-badge');
+    if (badge) { badge.textContent = 'online'; badge.title = 'De simulator draait in deze browser, op een echte CAN-bus via je adapter'; }
+  }
   const { loadPyodide } = await import('./pyodide/pyodide.mjs');
   // the standard library archive comes as base64 text; Pyodide gets it from a stand-in for fetch
   const b64 = await (await fetch('./pyodide/python_stdlib.b64.txt')).text();
@@ -57,6 +68,12 @@ try {
     py.FS.mkdirTree(full.slice(0, full.lastIndexOf('/')));
     py.FS.writeFile(full, text);
   }
+  // the settings of the simulator (config.json) stay in this browser
+  let saved = null;
+  try { saved = localStorage.getItem('tractorsim.config'); } catch { /* no storage */ }
+  if (saved) { py.FS.mkdirTree('/data'); py.FS.writeFile('/data/config.json', saved); }
+  py.globals.set('store_config', (text) => { try { localStorage.setItem('tractorsim.config', text); } catch { /* no storage */ } });
+  py.globals.set('can_send', onBus ? (id, ext, hex) => simBus.send(id, ext, hex) : null);
   let deliver = null;
   py.globals.set('post', (text) => { if (deliver) deliver(text); });
   const demo = await py.runPythonAsync(`
@@ -64,15 +81,20 @@ import logging, sys
 sys.path[:0] = ['/app', '/app/tools']
 logging.basicConfig(level=logging.WARNING)
 from tractorsim.browser import Demo
-demo = Demo(post)
+demo = Demo(post, can_send=can_send, store_config=store_config)
 await demo.start()
 demo`);
+  if (onBus) simBus.attach({ receive: (text) => demo.bus_rx(text), state: (up, label) => demo.bus_state(up, label) });
   globalThis.tractorsimBridge = {
     attach(fn) { deliver = fn; demo.hello(); },
     send(text) { demo.receive(text); },
   };
   await import('./app.js');
   document.getElementById('boot').hidden = true;
+  if (onBus && !(await simBus.connect(false))) {
+    const { toast } = await import('./util.js');
+    toast('Geen CAN-adapter verbonden: kies er een op de pagina Instellingen (Verbinden).', true);
+  }
 } catch (e) {
   console.error(e);
   step('Starten mislukt: ' + (e && e.message ? e.message : e));
@@ -134,7 +156,7 @@ def page(out_css, fragment=False):
     body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
     body = re.sub(r'<script type="module" src="app.js"></script>\s*', "", body)
     body = body.replace('RaspiTractorSim</a>', 'RaspiTractorSim</a>\n  <span class="demo-badge" title="Alles draait in deze '
-                        'browser op een gesimuleerde CAN-bus, met een testwerktuig">demo</span>', 1)
+                        'browser op een gesimuleerde CAN-bus, met een testwerktuig (pagina Instellingen: echte bus)">demo</span>', 1)
     head = ('<title>RaspiTractorSim</title>\n<meta name="theme-color" content="#1f2a22">\n'
             f"<style>\n{out_css}\n{DEMO_CSS}</style>\n")
     if fragment:

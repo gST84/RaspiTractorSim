@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 
 from .app import App
 
@@ -14,10 +15,11 @@ def main():
     ap = argparse.ArgumentParser(prog="tractorsim", description="ISOBUS-tractorsimulator met virtuele terminal")
     ap.add_argument("--bus", default=os.environ.get("TRACTORSIM_BUS", "can0"),
                     help="can0 / vcan0 (SocketCAN), virtual (UDP-bus om te testen zonder hardware), virtual:HOST:POORT, "
+                         "mcba of mcba:INDEX|SERIENUMMER (Microchip CAN BUS Analyzer via USB, met pyusb en libusb), "
                          "of pythoncan:INTERFACE:KANAAL (python-can, bv. pythoncan:pcan:PCAN_USBBUS1, pythoncan:kvaser:0, "
                          "pythoncan:vector:0, pythoncan:ixxat:0)")
     ap.add_argument("--bitrate", type=int, default=250000,
-                    help="voor de busbelasting en voor python-can; stel de bitrate van SocketCAN in met ip link")
+                    help="voor de busbelasting, mcba en python-can; stel de bitrate van SocketCAN in met ip link")
     ap.add_argument("--listen", action="store_true", default=os.environ.get("TRACTORSIM_LISTEN") == "1",
                     help="luistermodus: geen tractor-ECU, VT of GNSS en niets zenden (enkel de pagina Variabelen)")
     ap.add_argument("--host", default="0.0.0.0", help="adres van de webinterface (standaard: alle netwerkkaarten)")
@@ -51,6 +53,11 @@ def main():
         loop.run_until_complete(run())
     except KeyboardInterrupt:
         pass
+    except RuntimeError as e:  # bus not available: SocketCAN on macOS, python-can or pyusb missing, no analyzer
+        if a.verbose:
+            raise
+        print(f"tractorsim: {e}", file=sys.stderr)
+        sys.exit(1)
     finally:
         app.bus.close()
 

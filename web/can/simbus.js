@@ -24,6 +24,9 @@ export function saveBusConfig(cfg, store = storage()) {
   try { store?.setItem(KEY, JSON.stringify(cfg)); } catch { /* private window: only for this visit */ }
 }
 
+/** Closes a source without waiting forever: a stuck adapter must not block the page. */
+const closeSoon = (src) => Promise.race([Promise.resolve().then(() => src.close()).catch(() => {}), new Promise((r) => setTimeout(r, 1500))]);
+const hex4 = (v) => (v ?? 0).toString(16).toUpperCase().padStart(4, '0');
 const hexOf = (d) => { let s = ''; for (const b of d) s += (b < 16 ? '0' : '') + b.toString(16); return s; };
 const bytesOf = (h) => { const b = new Uint8Array(h.length >> 1); for (let i = 0; i < b.length; i++) b[i] = parseInt(h.substr(i * 2, 2), 16); return b; };
 
@@ -39,7 +42,8 @@ export class SimBus {
     this.txq = [];
     this.pumping = false;
     this.manualOff = false;
-    this.st = { connected: false, connecting: false, label: '', text: '', error: '', rx: 0, tx: 0, dropped: 0 };
+    this.st = { connected: false, connecting: false, label: '', text: '', error: '', rx: 0, tx: 0, dropped: 0, log: [] };
+    this.t0 = 0;
     this.fns = new Set();
   }
 
@@ -103,7 +107,9 @@ export class SimBus {
     if (this.st.connecting) return false;
     await this.disconnect(true);
     this.manualOff = false;
-    Object.assign(this.st, { connecting: true, error: '', text: 'verbinden…' });
+    Object.assign(this.st, { connecting: true, error: '', text: 'verbinden…', log: [] });
+    this.t0 = Date.now();
+    this.note(`verbinden: ${this.cfg.kind === 'serial' ? 'serieel' : 'USB'}, ${this.cfg.bitrate / 1000} kbit/s${ask ? ', adapter kiezen' : ''}`);
     this.emit();
     try {
       const opts = { listen: false, baud: this.cfg.baud };
@@ -117,8 +123,10 @@ export class SimBus {
       }
       if (!src) {
         this.st.text = 'geen adapter: klik op Verbinden en kies je adapter';
+        this.note('geen toegelaten adapter gevonden');
         return false;
       }
+      this.note(`gekozen: ${src.device?.productName || src.label}${src.device ? ` (${hex4(src.device.vendorId)}:${hex4(src.device.productId)})` : ''}`);
       await this.start(src);
       this.save({ device: src.identity });
       return true;
@@ -126,6 +134,8 @@ export class SimBus {
       this.st.text = 'niet verbonden';
       // NotFoundError: chooser closed; manualOff: stopped with Verbreken
       if (e?.name !== 'NotFoundError' && !this.manualOff) this.st.error = e?.message || String(e);
+      this.note(`mislukt: ${e?.name && e.name !== 'Error' ? e.name + ': ' : ''}${e?.message || e}`);
+      console.warn('CAN-adapter verbinden mislukt', e, this.st.log);
       return false;
     } finally {
       this.st.connecting = false;
@@ -140,7 +150,7 @@ export class SimBus {
         this.st.rx += fs.length;
         this.py?.receive(JSON.stringify(fs.map((f) => [f.id, f.ext ? 1 : 0, hexOf(f.data)])));
       },
-      status: (text) => { this.st.text = text; this.emit(); },
+      status: (text) => { this.st.text = text; this.note(text); this.emit(); },
       lost: () => {},
       closed: (why) => { if (this.src === src) this.lost(why); },
     };
@@ -148,22 +158,28 @@ export class SimBus {
     let timer;
     try {
       await Promise.race([src.open(sink), new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('de adapter antwoordt niet (time-out bij het verbinden)')), SimBus.OPEN_MS);
+        timer = setTimeout(() => reject(new Error(`de adapter antwoordt niet (time-out bij het verbinden, bij: ${this.st.text})`)), SimBus.OPEN_MS);
       })]);
     } catch (e) {
       if (this.src === src) this.src = null;
-      try { await src.close(); } catch { /* not open */ }
+      await closeSoon(src);
       throw e;
     } finally {
       clearTimeout(timer);
     }
     if (this.src !== src) { // Verbreken while connecting
-      try { await src.close(); } catch { /* already closed */ }
+      await closeSoon(src);
       throw new Error('verbinden afgebroken');
     }
     Object.assign(this.st, { connected: true, label: src.label, error: '' });
     this.py?.state(true, src.label);
     this.emit();
+  }
+
+  /** One line of the connection log (shown on the page when connecting fails). */
+  note(text) {
+    this.st.log.push(`${((Date.now() - this.t0) / 1000).toFixed(1)} s  ${text}`);
+    if (this.st.log.length > 14) this.st.log.splice(0, this.st.log.length - 14);
   }
 
   /** The adapter went away (unplugged, USB error). */
@@ -180,9 +196,7 @@ export class SimBus {
     const src = this.src;
     this.src = null;
     this.txq.length = 0;
-    if (src) {
-      try { await src.close(); } catch { /* already gone */ }
-    }
+    if (src) await closeSoon(src);
     if (this.st.connected) {
       this.st.connected = false;
       this.py?.state(false, '');

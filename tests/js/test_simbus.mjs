@@ -150,3 +150,22 @@ await testAsync('Verbreken tijdens het verbinden breekt de poging af', async () 
   ok(e instanceof Error, 'poging mislukt');
   eq([bus.st.connected, states, src.closes >= 1, bus.send(1, 1, '')], [false, [], true, 0]);
 });
+
+await testAsync('adapter die vastloopt én niet sluit: de echte fout en het verloop komen boven', async () => {
+  const dev = new FakeAnalyzer();
+  dev.dead = true;
+  dev.close = () => new Promise(() => {}); // Windows: closing a stuck device never finishes
+  const before = UsbSource.TIMEOUT_MS;
+  UsbSource.TIMEOUT_MS = 30;
+  try {
+    const bus = new SimBus(memStore());
+    bus.attach({ receive() {}, state() {} });
+    let err = null;
+    try { await bus.start(new UsbSource(dev, 250000, { listen: false })); } catch (e) { err = e; }
+    ok(err && /USB-schrijven: de adapter antwoordt niet/.test(err.message) && /nog niets ontvangen/.test(err.message), `fout: ${err && err.message}`);
+    ok(bus.st.log.some((l) => l.includes('instellen op 250 kbit/s')) && bus.st.log.some((l) => l.includes('bulk in 1, uit 1')), bus.st.log.join(' | '));
+    eq(bus.st.connected, false);
+  } finally {
+    UsbSource.TIMEOUT_MS = before;
+  }
+});

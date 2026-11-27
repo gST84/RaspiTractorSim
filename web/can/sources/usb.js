@@ -268,6 +268,7 @@ export class UsbSource {
     this.listen = opts.listen !== false;
     this.batch = 1; // frames per send() call
     this.txCount = 0;
+    this.inCount = 0; // USB transfers received (diagnosis: does the adapter talk at all?)
     this.info = USB_DEVICES.find((d) => d.vendorId === device.vendorId && d.productId === device.productId)
       || { name: device.productName || 'USB-adapter', driver: null };
     this.st = {};
@@ -313,13 +314,13 @@ export class UsbSource {
       await withTimeout(d.open(), UsbSource.TIMEOUT_MS, 'USB openen');
       if (!d.configuration) await withTimeout(d.selectConfiguration(1), UsbSource.TIMEOUT_MS, 'configuratie kiezen');
       this.ep = endpoints(d);
-      step('interface claimen…');
+      step(`interface ${this.ep.iface} claimen (bulk in ${this.ep.ins.join('/')}, uit ${this.ep.outs.join('/')})…`);
       await withTimeout(d.claimInterface(this.ep.iface), UsbSource.TIMEOUT_MS, 'interface claimen');
     } catch (e) {
       await this.close();
       const win = typeof navigator !== 'undefined' && /Windows/.test(navigator.userAgent || '');
       throw new Error(`USB openen mislukt: ${e.message || e}.` + (win
-        ? ' Op Windows moet de adapter de WinUSB-driver hebben, en geen ander programma (zoals de software van de fabrikant) mag hem open hebben.'
+        ? ' Op Windows: sluit de software van de fabrikant (die houdt de adapter vast) en kijk in chrome://device-log welke driver Windows gebruikt; de browser kan er enkel bij met WinUSB.'
         : ' Heeft een ander programma of tabblad de adapter open?'));
     }
     this.onDisconnect = (e) => { if (e.device === d && !this.closed) { this.closed = true; sink.closed('De USB-adapter is losgekoppeld.'); } };
@@ -343,7 +344,7 @@ export class UsbSource {
       else note = await this.startPcanFd();
     } catch (e) {
       await this.close();
-      throw e;
+      throw new Error(`${e.message || e} (${this.inCount ? `${this.inCount} USB-berichten ontvangen` : 'nog niets ontvangen van de adapter'})`);
     }
     sink.status(`${this.info.name} · ${this.bitrate / 1000} kbit/s${note ? ' · ' + note : ''}`);
   }
@@ -455,6 +456,7 @@ export class UsbSource {
         pending.push(next());
         if (r.status === 'stall') { await d.clearHalt('in', this.inEp); continue; }
         if (r.status !== 'ok' || !r.data || !r.data.byteLength) continue;
+        this.inCount++;
         const out = [];
         this.parse(bytesOf(r.data), now(), out);
         if (out.length) this.sink.frames(out);
@@ -470,6 +472,6 @@ export class UsbSource {
     this.closed = true;
     if (this.onDisconnect) usbApi()?.removeEventListener('disconnect', this.onDisconnect);
     try { await this.stopCmd?.(); } catch { /* already gone */ }
-    try { await this.device.close(); } catch { /* already closed */ }
+    try { await withTimeout(this.device.close(), Math.min(1000, UsbSource.TIMEOUT_MS), 'USB sluiten'); } catch { /* already closed, or stuck */ }
   }
 }

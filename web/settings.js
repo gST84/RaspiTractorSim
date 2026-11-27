@@ -80,6 +80,8 @@ function canCard() {
       st.connected || st.connecting ? ` ${st.text}` : null,
       st.error ? h('div', { class: 'err small' }, st.error) : null,
       !st.connected && !st.connecting && !st.error ? h('div', { class: 'muted small' }, hint) : null,
+      st.error && st.log.length ? h('details', { class: 'small', open: true }, h('summary', null, 'Verloop'),
+        h('pre', { class: 'mono muted', style: { whiteSpace: 'pre-wrap', margin: '4px 0 0' } }, st.log.join('\n'))) : null,
     ].filter(Boolean));
     if (connectBtn) connectBtn.disabled = st.connecting;
     if (offBtn) offBtn.disabled = !st.connected && !st.connecting; // also stops a connection attempt
@@ -115,7 +117,7 @@ function canCard() {
       statusEl = h('div', { class: 'small', role: 'status' });
     }
     card.replaceChildren(...[h('h3', null, 'CAN-bus'), ...rows,
-      statusEl ? h('div', { class: 'row' }, h('span', { class: 'lbl' }, 'Status'), statusEl) : null,
+      statusEl ? h('div', { class: 'row', style: { alignItems: 'flex-start', paddingTop: '6px' } }, h('span', { class: 'lbl' }, 'Status'), statusEl) : null,
       tools ? h('div', { class: 'toolbar small' }, tools) : null,
       !wantDemo ? h('p', { class: 'muted small' }, 'Houd dit tabblad open en zichtbaar: de simulator draait in deze pagina en op de '
         + 'achtergrond vertraagt de browser hem. De browser onthoudt je adapter; zit hij erin, dan verbindt hij bij het openen vanzelf.') : null,

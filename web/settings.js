@@ -82,7 +82,7 @@ function canCard() {
       !st.connected && !st.connecting && !st.error ? h('div', { class: 'muted small' }, hint) : null,
     ].filter(Boolean));
     if (connectBtn) connectBtn.disabled = st.connecting;
-    if (offBtn) offBtn.disabled = !st.connected;
+    if (offBtn) offBtn.disabled = !st.connected && !st.connecting; // also stops a connection attempt
   }
 
   function draw() {

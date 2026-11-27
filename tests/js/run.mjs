@@ -5,6 +5,14 @@ import { out, summary } from './harness.mjs';
 
 // jsc has no performance / setTimeout in module scope everywhere: give the modules what they use
 if (typeof globalThis.performance === 'undefined') globalThis.performance = { now: () => Date.now() };
+// jsc has setTimeout but no clearTimeout: a cancelled timer still runs out, but its callback is skipped
+if (typeof globalThis.clearTimeout === 'undefined') {
+  const real = globalThis.setTimeout;
+  const cancelled = new Set();
+  let n = 0;
+  globalThis.setTimeout = (fn, ms, ...args) => { const id = ++n; real(() => { if (!cancelled.delete(id)) fn(...args); }, ms); return id; };
+  globalThis.clearTimeout = (id) => { cancelled.add(id); };
+}
 
 await import('./test_core.mjs');
 await import('./test_drivers.mjs');

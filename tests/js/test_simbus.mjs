@@ -1,13 +1,14 @@
 // Sending through the adapter (the online simulator on a real bus, web/can/simbus.js): the transmit encoders of
 // the drivers (byte layouts of the Linux drivers) and the coupling between adapter and simulator.
 import { section, test, testAsync, eq, ok } from './harness.mjs';
-import { mcbaEncode, mcbaParse, gsEncode, gsParse, pcanEncode, pcanFdEncode } from '../../web/can/sources/usb.js';
+import { UsbSource, mcbaEncode, mcbaEncodeRx, mcbaParse, gsEncode, gsParse, pcanEncode, pcanFdEncode } from '../../web/can/sources/usb.js';
 import { slcanEncode, slcanLine } from '../../web/can/sources/slcan.js';
 import { SimBus, loadBusConfig, saveBusConfig, BUS_DEFAULTS } from '../../web/can/simbus.js';
 
 const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 const u8 = (...a) => Uint8Array.from(a);
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+SimBus.OPEN_MS = 300; // short: jsc lets a cancelled timer run out before it exits
 const memStore = () => ({ m: {}, getItem(k) { return this.m[k] ?? null; }, setItem(k, v) { this.m[k] = v; } });
 
 section('Zenden via de adapter');
@@ -79,4 +80,73 @@ await testAsync('koppeling: ontvangen naar de simulator, zenden in volgorde en i
   await tick();
   src.sink.closed('USB: losgekoppeld');
   eq([states.at(-1), bus.st.connected, bus.st.error, bus.send(0x100, 1, '')], [[false, ''], false, 'USB: losgekoppeld', 0]);
+});
+
+/** A Microchip CAN BUS Analyzer behind WebUSB. Like its firmware, it only takes a command while the host is reading
+ *  (an IN transfer is waiting); `dead`: it takes nothing at all. */
+class FakeAnalyzer {
+  constructor() {
+    Object.assign(this, { vendorId: 0x04d8, productId: 0x0a30, configuration: null, reads: [], outs: [], dead: false });
+  }
+  async open() {}
+  async selectConfiguration() {
+    this.configuration = { interfaces: [{ interfaceNumber: 0, alternate: { endpoints: [
+      { type: 'bulk', direction: 'in', endpointNumber: 1 }, { type: 'bulk', direction: 'out', endpointNumber: 1 }] } }] };
+  }
+  async claimInterface() {}
+  transferIn() { return new Promise((resolve, reject) => this.reads.push({ resolve, reject })); }
+  transferOut(ep, data) {
+    if (this.dead || !this.reads.length) return new Promise(() => {});
+    this.outs.push([ep, ...data.slice(0, 3)]);
+    return Promise.resolve({ status: 'ok', bytesWritten: data.length });
+  }
+  deliver(bytes) { this.reads.shift().resolve({ status: 'ok', data: new DataView(bytes.buffer) }); }
+  async close() { for (const r of this.reads.splice(0)) r.reject(new Error('closed')); }
+}
+const quietSink = (log = []) => ({ status: (t) => log.push(t), frames() {}, lost() {}, closed() {} });
+
+await testAsync('Microchip via WebUSB: eerst lezen, dan bitrate en firmware vragen; daarna zenden en ontvangen', async () => {
+  const dev = new FakeAnalyzer();
+  const src = new UsbSource(dev, 250000, { listen: false });
+  const texts = [], frames = [];
+  await src.open({ ...quietSink(texts), frames: (fs) => frames.push(...fs) });
+  eq(dev.outs, [[1, 0xa1, 0x00, 0xfa], [1, 0xa9, 1, 0], [1, 0xa9, 2, 0]]);
+  eq(texts.at(-1), 'Microchip CAN BUS Analyzer · 250 kbit/s');
+  ok(texts.some((t) => t.includes('USB openen')) && texts.some((t) => t.includes('instellen')), 'stappen in de status');
+  await src.send([{ id: 0x18fef100, ext: true, data: u8(1, 2) }]);
+  eq(dev.outs.at(-1), [1, 0xa3, 0xf1, 0x00]);
+  dev.deliver(mcbaEncodeRx(0x18eafffe, true, u8(0, 0xee, 0)));
+  await tick();
+  eq([frames.length, frames[0]?.id], [1, 0x18eafffe]);
+  await src.close();
+});
+
+await testAsync('analyzer die niets aanneemt: time-out met uitleg, niet eeuwig "verbinden…"', async () => {
+  const dev = new FakeAnalyzer();
+  dev.dead = true;
+  const before = UsbSource.TIMEOUT_MS;
+  UsbSource.TIMEOUT_MS = 30;
+  try {
+    const src = new UsbSource(dev, 250000, { listen: false });
+    let err = null;
+    try { await src.open(quietSink()); } catch (e) { err = e; }
+    ok(err && /time-out/.test(err.message), `fout: ${err && err.message}`);
+    ok(src.closed && dev.reads.length === 0, 'adapter weer gesloten');
+  } finally {
+    UsbSource.TIMEOUT_MS = before;
+  }
+});
+
+await testAsync('Verbreken tijdens het verbinden breekt de poging af', async () => {
+  const bus = new SimBus(memStore());
+  const states = [];
+  bus.attach({ receive() {}, state: (up) => states.push(up) });
+  const src = { label: 'hangt', closes: 0, open() { return new Promise((_, reject) => { this.reject = reject; }); },
+    async close() { this.closes++; this.reject?.(new Error('gesloten')); } };
+  const attempt = bus.start(src).catch((e) => e);
+  await tick();
+  await bus.disconnect();
+  const e = await attempt;
+  ok(e instanceof Error, 'poging mislukt');
+  eq([bus.st.connected, states, src.closes >= 1, bus.send(1, 1, '')], [false, [], true, 0]);
 });

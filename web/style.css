@@ -72,6 +72,7 @@ main { padding: 16px; max-width: 1680px; margin: 0 auto; }
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.ghost { background: transparent; }
+.btn:disabled { opacity: .5; cursor: default; border-color: var(--line); }
 .btn.small { padding: 3px 8px; font-size: 12px; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .toolbar.small { margin: 10px 0 0; }

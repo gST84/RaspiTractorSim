@@ -247,8 +247,19 @@ function endpoints(device) {
 }
 
 const supported = (d) => USB_DEVICES.find((u) => u.vendorId === d.vendorId && u.productId === d.productId);
+const usbApi = () => (typeof navigator !== 'undefined' ? navigator.usb : null);
+
+/** Rejects when `promise` takes longer than `ms`: a USB transfer that the adapter never takes would wait forever. */
+function withTimeout(promise, ms, what) {
+  let timer;
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what}: de adapter antwoordt niet (time-out)`)), ms); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
 
 export class UsbSource {
+  /** Longest wait for one USB step or transfer. */
+  static TIMEOUT_MS = 2000;
+
   /** opts.listen (default true): listen-only where the adapter can; false for the simulator, which sends. */
   constructor(device, bitrate, opts = {}) {
     this.kind = 'usb';
@@ -288,53 +299,83 @@ export class UsbSource {
     for (const f of frames) await this.out(this.txEp, this.encode(f));
   }
 
+  /** Opens and sets up the adapter. Every step shows in the status, so a step that hangs can be seen. Like the
+   *  Linux drivers, reading starts before the first command: the Microchip firmware only takes a new command when
+   *  its own messages (keep-alives, answers) can go out to the host. */
   async open(sink) {
     this.sink = sink;
     const d = this.device;
-    if (!this.info.driver) throw new Error(`${this.info.name} wordt niet ondersteund`);
-    await d.open();
-    if (!d.configuration) await d.selectConfiguration(1);
-    const ep = endpoints(d);
-    await d.claimInterface(ep.iface);
-    this.ep = ep;
-    this.onDisconnect = (e) => { if (e.device === d && !this.closed) { this.closed = true; sink.closed('De USB-adapter is losgekoppeld.'); } };
-    navigator.usb.addEventListener('disconnect', this.onDisconnect);
     const drv = this.info.driver;
-    let note = '';
-    if (drv === 'mcba') note = await this.startMcba();
-    else if (drv === 'gsusb') note = await this.startGs();
-    else if (drv === 'pcan') note = await this.startPcan();
-    else note = await this.startPcanFd();
-    sink.status(`${this.info.name} · ${this.bitrate / 1000} kbit/s${note ? ' · ' + note : ''}`);
+    if (!drv) throw new Error(`${this.info.name} wordt niet ondersteund`);
+    const step = (t) => sink.status(`${this.info.name}: ${t}`);
+    try {
+      step('USB openen…');
+      await withTimeout(d.open(), UsbSource.TIMEOUT_MS, 'USB openen');
+      if (!d.configuration) await withTimeout(d.selectConfiguration(1), UsbSource.TIMEOUT_MS, 'configuratie kiezen');
+      this.ep = endpoints(d);
+      step('interface claimen…');
+      await withTimeout(d.claimInterface(this.ep.iface), UsbSource.TIMEOUT_MS, 'interface claimen');
+    } catch (e) {
+      await this.close();
+      const win = typeof navigator !== 'undefined' && /Windows/.test(navigator.userAgent || '');
+      throw new Error(`USB openen mislukt: ${e.message || e}.` + (win
+        ? ' Op Windows moet de adapter de WinUSB-driver hebben, en geen ander programma (zoals de software van de fabrikant) mag hem open hebben.'
+        : ' Heeft een ander programma of tabblad de adapter open?'));
+    }
+    this.onDisconnect = (e) => { if (e.device === d && !this.closed) { this.closed = true; sink.closed('De USB-adapter is losgekoppeld.'); } };
+    usbApi()?.addEventListener('disconnect', this.onDisconnect);
+    const ep = this.ep;
+    [this.inEp, this.outEp, this.inLen] = { mcba: [ep.ins[0], ep.outs[0], 64], gsusb: [ep.ins[0], ep.outs[0], 64],
+      pcan: [2, 1, 64], pcanfd: [2, 1, 2048] }[drv]; // PEAK: commands out 1, messages in 0x82
+    this.parse = {
+      mcba: (buf, t, out) => mcbaParse(buf, t, out, this.st),
+      gsusb: (buf, t, out) => { const f = gsParse(buf, t, this.st); if (f) out.push(f); },
+      pcan: (buf, t, out) => pcanParse(buf, t, out, this.st),
+      pcanfd: (buf, t, out) => pcanFdParse(buf, t, out, this.st),
+    }[drv];
     this.readLoop();
+    let note = '';
+    try {
+      step(`instellen op ${this.bitrate / 1000} kbit/s…`);
+      if (drv === 'mcba') note = await this.startMcba();
+      else if (drv === 'gsusb') note = await this.startGs();
+      else if (drv === 'pcan') note = await this.startPcan();
+      else note = await this.startPcanFd();
+    } catch (e) {
+      await this.close();
+      throw e;
+    }
+    sink.status(`${this.info.name} · ${this.bitrate / 1000} kbit/s${note ? ' · ' + note : ''}`);
   }
 
-  async out(epNum, data) { const r = await this.device.transferOut(epNum, data); if (r.status !== 'ok') throw new Error(`USB-schrijven: ${r.status}`); }
+  async out(epNum, data) {
+    const r = await withTimeout(this.device.transferOut(epNum, data), UsbSource.TIMEOUT_MS, 'USB-schrijven');
+    if (r.status !== 'ok') throw new Error(`USB-schrijven: ${r.status}`);
+  }
 
   async startMcba() {
-    this.inEp = this.ep.ins[0]; this.outEp = this.ep.outs[0]; this.inLen = 64;
     await this.out(this.outEp, mcbaCommand(MCBA.BITRATE, (this.bitrate / 1000) >> 8, (this.bitrate / 1000) & 0xff));
     await this.out(this.outEp, mcbaCommand(MCBA.FW, 1));
     await this.out(this.outEp, mcbaCommand(MCBA.FW, 2));
-    this.parse = (buf, t, out) => mcbaParse(buf, t, out, this.st);
     this.txEp = this.outEp;
     this.encode = (f) => mcbaEncode(f.id, f.ext, f.data);
     return this.listen ? 'geen listen-only: de analyzer bevestigt frames (ACK), maar zendt niets' : '';
   }
 
   async ctrlOut(request, value, data) {
-    const r = await this.device.controlTransferOut({ requestType: 'vendor', recipient: 'interface', request, value, index: this.ep.iface }, data);
+    const r = await withTimeout(this.device.controlTransferOut({ requestType: 'vendor', recipient: 'interface', request, value, index: this.ep.iface }, data),
+      UsbSource.TIMEOUT_MS, `USB-verzoek ${request}`);
     if (r.status !== 'ok') throw new Error(`USB-verzoek ${request}: ${r.status}`);
   }
 
   async ctrlIn(request, value, length) {
-    const r = await this.device.controlTransferIn({ requestType: 'vendor', recipient: 'interface', request, value, index: this.ep.iface }, length);
+    const r = await withTimeout(this.device.controlTransferIn({ requestType: 'vendor', recipient: 'interface', request, value, index: this.ep.iface }, length),
+      UsbSource.TIMEOUT_MS, `USB-verzoek ${request}`);
     if (r.status !== 'ok') throw new Error(`USB-verzoek ${request}: ${r.status}`);
     return bytesOf(r.data);
   }
 
   async startGs() {
-    this.inEp = this.ep.ins[0]; this.outEp = this.ep.outs[0]; this.inLen = 64;
     await this.ctrlOut(GS.HOST_FORMAT, 1, u32le(0x0000beef));
     const cfg = await this.ctrlIn(GS.DEVICE_CONFIG, 1, 12);
     const bt = await this.ctrlIn(GS.BT_CONST, 0, 40);
@@ -346,7 +387,6 @@ export class UsbSource {
     const listen = this.listen && !!(feature & GS.LISTEN_ONLY);
     await this.ctrlOut(GS.MODE, 0, u32le(1, listen ? GS.LISTEN_ONLY : 0)); // start
     this.stopCmd = () => this.ctrlOut(GS.MODE, 0, u32le(0, 0));
-    this.parse = (buf, t, out) => { const f = gsParse(buf, t, this.st); if (f) out.push(f); };
     this.txEp = this.outEp;
     this.encode = (f) => gsEncode(f.id, f.ext, f.data, this.txCount++ % 10);
     const mode = !this.listen ? '' : listen ? ', listen-only' : ', geen listen-only in deze firmware: de adapter bevestigt frames (ACK)';
@@ -354,7 +394,6 @@ export class UsbSource {
   }
 
   async startPcan() {
-    this.inEp = 2; this.outEp = 1; this.inLen = 64; // command out 1, messages in 0x82
     const cmd = (f, n, args = []) => { const b = new Uint8Array(16); b[0] = f; b[1] = n; b.set(args, 2); return this.out(1, b); };
     const btr = PCAN_BTR[this.bitrate];
     if (!btr) throw new Error(`PCAN-USB: ${this.bitrate / 1000} kbit/s niet ondersteund (125, 250, 500, 1000)`);
@@ -369,7 +408,6 @@ export class UsbSource {
     await cmd(3, 2, [1]); // bus on
     await sleep(10);
     this.stopCmd = () => cmd(3, 2, [0]);
-    this.parse = (buf, t, out) => pcanParse(buf, t, out, this.st);
     this.txEp = 2; // messages out
     this.encode = (f) => pcanEncode(f.id, f.ext, f.data, this.txCount++);
     if (!this.listen) return '';
@@ -377,7 +415,6 @@ export class UsbSource {
   }
 
   async startPcanFd() {
-    this.inEp = 2; this.outEp = 1; this.inLen = 2048; // command out 1, messages in 0x82
     const send = async (records) => { for (const b of ucanPackets(records)) await this.out(1, b); };
     const drvLoaded = (on) => this.device.controlTransferOut({ requestType: 'vendor', recipient: 'other', request: 2, value: 5, index: 0 },
       Uint8Array.from([0, on ? 1 : 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
@@ -397,7 +434,6 @@ export class UsbSource {
       [...op(this.listen ? UCAN.LISTEN : UCAN.NORMAL), 0, 0, 0, 0, 0, 0], // operational: listen-only or normal
     ]);
     this.stopCmd = async () => { await send([[...op(UCAN.RESET), 0, 0, 0, 0, 0, 0]]); await drvLoaded(false); };
-    this.parse = (buf, t, out) => pcanFdParse(buf, t, out, this.st);
     this.txEp = 2; // messages out (PCAN_USBPRO_EP_MSGOUT_0)
     this.encode = (f) => pcanFdEncode(f.id, f.ext, f.data);
     return this.listen ? 'listen-only' : '';
@@ -428,7 +464,7 @@ export class UsbSource {
 
   async close() {
     this.closed = true;
-    navigator.usb.removeEventListener('disconnect', this.onDisconnect);
+    if (this.onDisconnect) usbApi()?.removeEventListener('disconnect', this.onDisconnect);
     try { await this.stopCmd?.(); } catch { /* already gone */ }
     try { await this.device.close(); } catch { /* already closed */ }
   }

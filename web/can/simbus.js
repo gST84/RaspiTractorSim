@@ -28,6 +28,9 @@ const hexOf = (d) => { let s = ''; for (const b of d) s += (b < 16 ? '0' : '') +
 const bytesOf = (h) => { const b = new Uint8Array(h.length >> 1); for (let i = 0; i < b.length; i++) b[i] = parseInt(h.substr(i * 2, 2), 16); return b; };
 
 export class SimBus {
+  /** Safety net for connecting; the drivers also time out each step themselves. */
+  static OPEN_MS = 15000;
+
   constructor(store) {
     this.store = store;
     this.cfg = loadBusConfig(store);
@@ -121,7 +124,8 @@ export class SimBus {
       return true;
     } catch (e) {
       this.st.text = 'niet verbonden';
-      if (e?.name !== 'NotFoundError') this.st.error = e?.message || String(e); // NotFoundError: chooser closed
+      // NotFoundError: chooser closed; manualOff: stopped with Verbreken
+      if (e?.name !== 'NotFoundError' && !this.manualOff) this.st.error = e?.message || String(e);
       return false;
     } finally {
       this.st.connecting = false;
@@ -141,12 +145,21 @@ export class SimBus {
       closed: (why) => { if (this.src === src) this.lost(why); },
     };
     this.src = src;
+    let timer;
     try {
-      await src.open(sink);
+      await Promise.race([src.open(sink), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('de adapter antwoordt niet (time-out bij het verbinden)')), SimBus.OPEN_MS);
+      })]);
     } catch (e) {
-      this.src = null;
+      if (this.src === src) this.src = null;
       try { await src.close(); } catch { /* not open */ }
       throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (this.src !== src) { // Verbreken while connecting
+      try { await src.close(); } catch { /* already closed */ }
+      throw new Error('verbinden afgebroken');
     }
     Object.assign(this.st, { connected: true, label: src.label, error: '' });
     this.py?.state(true, src.label);
@@ -162,7 +175,7 @@ export class SimBus {
     this.emit();
   }
 
-  /** Closes the adapter. `quiet`: part of a reconnect, no status change shown. */
+  /** Closes the adapter, also one that is still connecting. `quiet`: part of a reconnect, no status change shown. */
   async disconnect(quiet = false) {
     const src = this.src;
     this.src = null;

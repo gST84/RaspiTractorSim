@@ -80,6 +80,16 @@ sudo deploy/install.sh can0 8080
 De service zet `can0` op 250 kbit/s (met automatische herstart na bus-off en een grotere zendwachtrij) en start de
 simulator bij elke boot. Webinterface: `http://<adres-van-de-pi>:8080`. Logboek: `journalctl -u tractorsim -f`.
 
+**Automatisch bijwerken:** 20 s na het opstarten haalt `tractorsim-update` de laatste versie van GitHub op
+(`deploy/update.sh`, `git pull --ff-only`). Alleen bij een nieuwe versie herstart de simulator. Er zijn tot 10 pogingen
+voor het netwerk. Zonder internet (bv. op de tractor) start de simulator meteen met de versie die er al is. Met lokale
+wijzigingen in de map verandert er niets.
+
+- Nu bijwerken: `sudo systemctl start tractorsim-update`.
+- Wat er gebeurde: `journalctl -u tractorsim-update`.
+- Uitzetten: `sudo systemctl disable --now tractorsim-update.timer`.
+- Na een wijziging in `deploy/` zelf: `sudo deploy/install.sh` opnieuw uitvoeren. Het logboek van de update meldt dat.
+
 Met de hand (zonder service):
 
 ```bash
@@ -310,4 +320,4 @@ Change Attribute volgt de veldvolgorde van de objecten (niet tegen de norm gecon
 | `web/can/simbus.js`, `tractorsim/browser.py` | de online versie: demo of een echte bus via de adapter (WebUSB/WebSerial) |
 | `tests/test_all.py` | `python3 -m unittest discover -s tests` |
 | `tests/js/` | JS-tests van de analyzer: `jsc -m tests/js/run.mjs` (macOS, JavaScriptCore) of `node tests/js/run.mjs` |
-| `deploy/` | systemd-service en installatiescript |
+| `deploy/` | systemd-service, installatiescript en het automatisch bijwerken (`update.sh`, `tractorsim-update.service/.timer`) |

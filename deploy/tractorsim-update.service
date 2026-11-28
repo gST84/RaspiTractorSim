@@ -1,0 +1,15 @@
+# Haalt de laatste versie van GitHub op (deploy/update.sh) en herstart de simulator als er een nieuwe versie was.
+# deploy/install.sh vult USER en DIR in; gestart door tractorsim-update.timer kort na het opstarten.
+[Unit]
+Description=raspISO - laatste versie ophalen van GitHub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@DIR@
+ExecStart=/bin/sh @DIR@/deploy/update.sh
+# met rootrechten (de '+'): enkel herstarten als update.sh een nieuwe versie ophaalde
+ExecStartPost=+/bin/sh -c 'if [ -f /tmp/tractorsim-updated ]; then rm -f /tmp/tractorsim-updated; systemctl restart tractorsim; fi'
+TimeoutStartSec=20min

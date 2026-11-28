@@ -1,0 +1,10 @@
+# Start tractorsim-update.service kort na het opstarten. De simulator zelf wacht daar niet op: zonder netwerk start hij
+# meteen met de versie die er al is.
+[Unit]
+Description=raspISO - na het opstarten de laatste versie ophalen
+
+[Timer]
+OnBootSec=20s
+
+[Install]
+WantedBy=timers.target

@@ -26,7 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYODIDE = "0.26.4"
 PYODIDE_URL = f"https://cdn.jsdelivr.net/npm/pyodide@{PYODIDE}/"
 PYODIDE_FILES = ["pyodide.mjs", "pyodide.asm.js", "pyodide.asm.wasm", "python_stdlib.zip", "pyodide-lock.json"]
-PY_SOURCES = ["tractorsim", "tools/fake_implement.py", "tools/demo_pool.py"]
+PY_SOURCES = ["tractorsim", "tools/fake_implement.py", "tools/demo_pool.py", "tools/demo_tc.py"]
 
 BOOT = """
 <div id="boot" role="status" aria-live="polite">

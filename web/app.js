@@ -1,13 +1,14 @@
 import { $, connect, on, onConnection, toast, send } from './util.js';
 import * as tractor from './tractor.js';
 import * as vt from './vtpage.js';
+import * as tc from './tcpage.js';
 import * as bus from './bus.js';
 import * as variables from './variables.js';
 import * as settings from './settings.js';
 
 // Analyzer build (tools/build_demo.py --analyzer): only the Variabelen page, no simulator to connect to.
 const analyzer = document.body.dataset.mode === 'analyzer';
-const pages = analyzer ? { variabelen: variables } : { tractor, vt, bus, variabelen: variables, instellingen: settings };
+const pages = analyzer ? { variabelen: variables } : { tractor, vt, tc, bus, variabelen: variables, instellingen: settings };
 const home = analyzer ? 'variabelen' : 'tractor';
 let current = null;
 
@@ -45,7 +46,7 @@ if (!analyzer) {
     const pills = own.map((c) => {
       const s = document.createElement('span');
       s.className = 'pill ' + (c.state === 'actief' ? 'ok' : c.state === 'claimen' ? 'warn' : 'err');
-      s.textContent = `${{ tecu: 'TECU', vt: 'VT', gnss: 'GNSS' }[c.key]} ${c.address != null && c.address < 254 ? c.address.toString(16).toUpperCase() : '—'}`;
+      s.textContent = `${{ tecu: 'TECU', vt: 'VT', gnss: 'GNSS', tc: 'TC' }[c.key]} ${c.address != null && c.address < 254 ? c.address.toString(16).toUpperCase() : '—'}`;
       s.title = `${c.label}: ${c.state}\n${c.nameText}`;
       return s;
     });

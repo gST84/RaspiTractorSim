@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Test implement: a working set that connects to the VT of the simulator, uploads the demo pool
-(over ETP), shows the tractor data on its masks and reacts to soft keys, buttons and inputs.
+(over ETP), shows the tractor data on its masks and reacts to soft keys, buttons and inputs. It is also a TC client
+(tools/demo_tc.py): a sprayer with 8 sections of 3 m that follows the section control and the prescription map of the
+task controller.
 
     python3 tools/fake_implement.py                    # to a simulator started with --bus virtual on this PC
     python3 tools/fake_implement.py --bus vcan0        # SocketCAN (on the Pi, or a second CAN interface)
@@ -21,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tractorsim.canbus import open_bus  # noqa: E402
 from tractorsim.j1939 import GLOBAL, ControlFunction, Network, le, name_decode, name_encode  # noqa: E402
 import demo_pool as D  # noqa: E402
+import demo_tc  # noqa: E402
 
 log = logging.getLogger("werktuig")
 PGN_VT_TO_ECU, PGN_ECU_TO_VT, PGN_WS_MASTER = 0xE600, 0xE700, 0xFE0D
@@ -48,6 +51,8 @@ class Implement:
         self.status_t = 0.0
         cf.handlers.append(self.on_msg)
         net.listeners.append(self.on_bus)
+        self.tcc = demo_tc.TcClient(net, cf, demo_tc.sprayer_ddop(cf.name.to_bytes(8, "little")))
+        self._tc_task = None
 
     # ----- CAN
     def to_vt(self, data):
@@ -134,6 +139,8 @@ class Implement:
     # ----- connect & upload
     async def run(self):
         """Connects, and connects again when the VT disappears (no VT Status for 3 s)."""
+        if self._tc_task is None:
+            self._tc_task = [asyncio.ensure_future(self.tcc.run()), asyncio.ensure_future(self.sprayer())]
         while True:
             maint = None
             try:
@@ -207,6 +214,22 @@ class Implement:
             await asyncio.sleep(1.0)
             self.to_vt([0xFF, 0x00, 4])
             self.cf.send(PGN_WS_MASTER, bytes([1]))
+
+    async def sprayer(self):
+        """The sprayer for the task controller: the TC work state switches spraying, the sections and the rate
+        follow the TC (tools/demo_tc.py)."""
+        work = False
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.1)
+            now = time.monotonic()
+            if self.tcc.work != work:  # the TC started or stopped the task
+                work = self.tcc.work
+                self.spraying = work
+            if self.tractor.get("stop") == 0:
+                self.spraying = False
+            self.tcc.step(now - last, self.tractor.get("speed") or 0.0, self.spraying)
+            last = now
 
     # ----- live values
     def num(self, oid, value):

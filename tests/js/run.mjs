@@ -18,6 +18,7 @@ await import('./test_core.mjs');
 await import('./test_drivers.mjs');
 await import('./test_dbc.mjs');
 await import('./test_tc.mjs');
+await import('./test_tcmap.mjs');
 await import('./test_simbus.mjs');
 await import('./test_clock.mjs');
 

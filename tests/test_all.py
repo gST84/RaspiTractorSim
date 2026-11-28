@@ -2,10 +2,12 @@
 import asyncio
 import base64
 import errno
+import json
 import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -545,6 +547,281 @@ class TestOnlineAdapter(unittest.TestCase):
         demo = Demo(lambda t: None, tempfile.mkdtemp())
         self.assertIsNone(demo.bus)
         self.assertEqual(demo.app.bus_spec, "memory")
+
+
+# ---------------------------------------------------------------- task controller
+class RecordEvents(FakeEvents):
+    def __init__(self):
+        self.log = []
+
+    def tclog(self, entry):
+        self.log.append(entry)
+
+
+def _shapefile(polys, rates, prj='GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137,298.257223563]]]'):
+    """A tiny shapefile (.zip): polygons [(lon, lat), …] (clockwise) with a numeric field RATE."""
+    import io
+    import zipfile
+    recs = b""
+    for k, ring in enumerate(polys):
+        pts = ring + ring[:1]
+        content = struct.pack("<i4dii", 5, 0, 0, 0, 0, 1, len(pts)) + struct.pack("<i", 0) + b"".join(struct.pack("<dd", x, y) for x, y in pts)
+        recs += struct.pack(">ii", k + 1, len(content) // 2) + content
+    head = struct.pack(">i5ii", 9994, 0, 0, 0, 0, 0, (100 + len(recs)) // 2) + struct.pack("<ii4d4d", 1000, 5, 0, 0, 0, 0, 0, 0, 0, 0)
+    fields = b"RATE".ljust(11, b"\0") + b"N" + b"\0" * 4 + bytes([10, 2]) + b"\0" * 14
+    hlen = 32 + len(fields) + 1
+    dbf = struct.pack("<BBBBIHH", 3, 126, 1, 1, len(rates), hlen, 11) + b"\0" * 20 + fields + b"\x0d"
+    dbf += b"".join(b" " + f"{r:10.2f}".encode() for r in rates) + b"\x1a"
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr("kaart.shp", head + recs)
+        f.writestr("kaart.dbf", dbf)
+        if prj:
+            f.writestr("kaart.prj", prj)
+    return z.getvalue()
+
+
+class TestTC(unittest.TestCase):
+    NAME = name_encode({"identity": 9, "function": 132})
+
+    def test_ddop(self):
+        from tractorsim.tc import ddop as TD
+        import demo_tc
+        data = demo_tc.sprayer_ddop(self.NAME.to_bytes(8, "little"))
+        objs = TD.parse(data)
+        self.assertEqual(TD.encode(objs), data)
+        self.assertEqual(TD.check(objs), [])
+        pool = TD.Pool(objs, data)
+        self.assertEqual(pool.label, b"DEMOSP1")
+        geo = pool.sections()
+        self.assertEqual(geo["boom"], demo_tc.EL_BOOM)
+        self.assertEqual([s["y"] for s in geo["sections"]][:2], [-10500, -7500])
+        self.assertEqual(geo["sections"][0]["x"], -1500)
+        self.assertEqual(geo["sections"][0]["w"], 3000)
+        v = TD.condensed([True, False, True], 0)
+        self.assertEqual(v & 0x3F, 0b010001)
+        self.assertEqual((v >> 6) & 3, 3)  # section 4 does not exist
+        self.assertEqual(TD.uncondensed(v, 0, 3), {0: True, 1: False, 2: True})
+        bad = [dict(o) for o in objs]
+        det = next(o for o in bad if o["table"] == "DET")
+        det["children"] = det["children"] + [999]
+        self.assertEqual(TD.check(bad)[0][1], 999)
+        with self.assertRaises(TD.DdopError):
+            TD.parse(data[:-3])
+
+    def _setup(self, tmp, position=lambda: None, sections=8):
+        import demo_tc
+        from tractorsim.tc.server import TCServer
+        group = []
+        sbus, ibus = LoopBus(group), LoopBus(group)
+        snet, inet = Network(sbus), Network(ibus)
+        snet.start(), inet.start()
+        tcf = ControlFunction(snet, "TC", name_encode({"identity": 7, "function": 130}), 0xF7)
+        wcf = ControlFunction(inet, "WS", self.NAME, 0x80)
+        ev = RecordEvents()
+        cfg = {"version": 4, "booms": 1, "sections": 16, "channels": 1, "memory": 1 << 20}
+        tc = TCServer(snet, tcf, cfg, tmp, ev, lambda: b"nl" + b"\xff" * 6, position)
+        client = demo_tc.TcClient(inet, wcf, demo_tc.sprayer_ddop(self.NAME.to_bytes(8, "little"), sections), sections)
+        tcf.start(), wcf.start()
+        tc.start()
+        return tc, client, ev, (snet, inet, wcf)
+
+    async def _until(self, cond, t=5.0):
+        end = time.monotonic() + t
+        while time.monotonic() < end:
+            if cond():
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    def test_session(self):
+        import demo_tc
+
+        async def go():
+            tmp = tempfile.mkdtemp()
+            tc, client, ev, (snet, inet, wcf) = self._setup(tmp)
+            task = asyncio.ensure_future(client.run())
+            self.assertTrue(await self._until(lambda: client.state == "verbonden"), client.state)
+            c = tc.clients[0x80]
+            self.assertEqual(c.state, "actief")
+            self.assertEqual(c.pool.designator, "Demospuit")
+            self.assertEqual(client.tc_version, 4)
+            self.assertEqual(c.version["sections"], 8)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "tc", f"{self.NAME:016X}.ddop")))
+            # measurement commands from the trigger methods, then every value requested once
+            self.assertTrue(await self._until(lambda: (demo_tc.EL_TANK, 2) in client.triggers and (demo_tc.EL_TANK, 72) in c.values))
+            self.assertEqual(client.triggers[(demo_tc.EL_TANK, 2)]["time"], 1000)
+            self.assertEqual(c.values[(demo_tc.EL_TANK, 72)], demo_tc.TANK_ML)
+            # section control on: the TC asks automatic mode, the implement reports it back on change
+            self.assertTrue(await self._until(lambda: client.sc_auto))
+            client.step(0.1, 0, False)
+            self.assertTrue(await self._until(lambda: tc.sc_auto(c)))
+            # a setpoint from the page
+            tc.set_value(0x80, demo_tc.EL_TANK, 1, 2_000_000)
+            self.assertTrue(await self._until(lambda: client.setpoint == 2_000_000))
+            # the task: work state on, status bit
+            tc.set_task("start")
+            self.assertTrue(await self._until(lambda: client.work and client.tc_status & 1))
+            tc.set_task("stop")
+            self.assertTrue(await self._until(lambda: not client.work))
+            transfers = sum(1 for e in ev.log if e["func"] == "Object-pool Transfer")
+            self.assertEqual(transfers, 1)
+            # connect again: same labels → no transfer
+            task.cancel()
+            tc.clients.clear()
+            client2 = demo_tc.TcClient(inet, wcf, client.ddop)
+            client2.tc, client2.tc_seen = 0xF7, time.monotonic()
+            await client2.connect()
+            self.assertEqual(sum(1 for e in ev.log if e["func"] == "Object-pool Transfer"), 1)
+            self.assertEqual(tc.clients[0x80].state, "actief")
+            # a client that stops sending Client Task is dropped after 6 s
+            tc.clients[0x80].last_task -= 7
+            self.assertTrue(await self._until(lambda: 0x80 not in tc.clients, 1.0))
+            tc.stop()
+        run(go())
+
+    def test_etp_and_refused_pool(self):
+        from tractorsim.tc import ddop as TD
+
+        async def go():
+            tc, client, ev, (snet, inet, wcf) = self._setup(tempfile.mkdtemp(), sections=40)
+            self.assertGreater(len(client.ddop), 1785)  # extended transport protocol
+            self.assertTrue(await self._until(lambda: wcf.active and tc.cf.active))
+            client.tc = 0xF7
+            client.tc_seen = time.monotonic()
+            await client.connect()
+            c = tc.clients[0x80]
+            self.assertEqual(len(c.geometry["sections"]), 40)
+            # a pool with a broken reference is refused with the faulty object
+            objs = TD.parse(client.ddop)
+            det = next(o for o in objs if o["table"] == "DET")
+            det["children"].append(4321)
+            client.ddop = TD.encode(objs)
+            client.pool = TD.Pool(objs, client.ddop)
+            client.pool.device["structureLabel"] = b"OTHER01"
+            objs[0]["structureLabel"] = b"OTHER01"
+            client.ddop = TD.encode(objs)
+            client.pool = TD.Pool(objs, client.ddop)
+            with self.assertRaises(RuntimeError) as cm:
+                await client.connect()
+            self.assertIn("4321", str(cm.exception))
+            self.assertEqual(c.state, "fout")
+            tc.stop()
+        run(go())
+
+    def test_section_control(self):
+        from tractorsim.tc import ddop as TD
+        from tractorsim.tc.field import Coverage, Field
+        from tractorsim.tc.section import SectionControl
+        import demo_tc
+        data = demo_tc.sprayer_ddop(self.NAME.to_bytes(8, "little"))
+        f = Field.rectangle(51.0, 4.0, 0.0, 100.0, 48.0)
+        cov = Coverage.for_field(f)
+        sc = SectionControl()
+        sc.hitch = (0.0, 0.0)
+        sc.configure(TD.Pool(TD.parse(data), data).sections())
+        self.assertAlmostEqual(sc.width, 24.0)
+
+        def drive(y, n0, n1, speed=3.0, dt=0.1):
+            seen = []
+            n = n0
+            sc.reset()
+            while n <= n1:
+                want = sc.decide(y, n, 0.0, speed, cov, f)
+                sc.paint(y, n, 0.0, want, cov)
+                seen.append((n, list(want)))
+                n += speed * dt
+            return seen
+
+        first = drive(12.0, -10.0, 110.0)
+        inside = [w for n, w in first if 5 < n < 95]
+        self.assertTrue(all(all(w) for w in inside))
+        self.assertFalse(any(any(w) for n, w in first if n < -3 or n > 102))  # outside the field
+        self.assertAlmostEqual(cov.area(), 100 * 24, delta=100)
+        again = drive(12.0, 0.0, 100.0)  # the same lane: everything is worked already
+        self.assertFalse(any(any(w) for n, w in again if 5 < n < 95))
+        shifted = drive(33.0, 0.0, 100.0)  # next lane 3 m too close: the leftmost section overlaps fully
+        mid = [w for n, w in shifted if 20 < n < 80]
+        self.assertTrue(all(not w[0] and all(w[1:]) for w in mid), mid[:2])
+
+    def test_prescription(self):
+        from tractorsim.tc.field import Field
+        from tractorsim.tc.prescription import MapError, Prescription
+        f = Field.rectangle(51.0, 4.0, 0.0, 100.0, 50.0)
+        fr = f.frame
+        sq = lambda e0, n0, e1, n1: [fr.to_geo(e, n)[::-1] for e, n in ((e0, n0), (e1, n0), (e1, n1), (e0, n1), (e0, n0))]
+        gj = {"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"naam": "a", "dosis": 150}, "geometry": {"type": "Polygon", "coordinates": [sq(0, 0, 50, 50)]}},
+            {"type": "Feature", "properties": {"naam": "b", "dosis": "250,5"}, "geometry": {"type": "Polygon", "coordinates": [sq(0, 50, 50, 100)]}}]}
+        p = Prescription.from_geojson(json.dumps(gj))
+        self.assertEqual(p.prop, "dosis")
+        self.assertEqual(p.rate_at(fr, 10, 10), 150)
+        self.assertEqual(p.rate_at(fr, 10, 60), 250.5)
+        self.assertIsNone(p.rate_at(fr, 80, 60))
+        with self.assertRaises(MapError):
+            Prescription.from_geojson(json.dumps(gj), prop="bestaatniet")
+        # shapefile: clockwise rings (x = lon, y = lat)
+        cw = lambda e0, n0, e1, n1: [fr.to_geo(e, n)[::-1] for e, n in ((e0, n0), (e0, n1), (e1, n1), (e1, n0))]
+        shp = _shapefile([cw(0, 0, 50, 50), cw(0, 50, 50, 100)], [120.0, 180.0])
+        p = Prescription.from_shapefile(shp)
+        self.assertEqual(p.rate_at(fr, 25, 25), 120.0)
+        self.assertEqual(p.rate_at(fr, 25, 75), 180.0)
+        with self.assertRaises(MapError):
+            Prescription.from_shapefile(_shapefile([cw(0, 0, 50, 50)], [1.0], 'PROJCS["Belge_Lambert_1972",GEOGCS["GCS_Belge_1972"]]'))
+        d = Prescription.demo(f, 100, 200)
+        rates = d.rates()
+        self.assertTrue(rates and min(rates) >= 100 and max(rates) <= 200 and max(rates) > min(rates))
+        self.assertIsNotNone(d.rate_at(fr, 25, 50))
+        # saved and read again keeps the rates
+        again = Prescription.from_geojson(p.save(), prop="rate")
+        self.assertEqual(again.rate_at(fr, 25, 75), 180.0)
+
+    def test_field_work(self):
+        """Autopilot, section control and the prescription map together, with the demo sprayer."""
+        import demo_tc
+        from tractorsim.tc.prescription import Prescription
+
+        async def go():
+            sim = Sim()
+            sim.set("drive.speed", 36)  # 10 m/s: a quick test
+            pos = lambda: {"lat": sim.live["lat"], "lon": sim.live["lon"], "heading": sim.live["heading"], "speed": sim.ground_speed, "source": "sim"}
+            tc, client, ev, nets = self._setup(tempfile.mkdtemp(), pos)
+            tc.stop()  # the test drives tick() itself
+            tc.sim = sim
+            tc.opts["hitchX"] = 0.0
+            tc._apply_sc()
+            self.assertTrue(await self._until(lambda: nets[2].active and tc.cf.active))
+            client.tc, client.tc_seen = 0xF7, time.monotonic()
+            await client.connect()
+            self.assertTrue(await self._until(lambda: client.sc_auto))
+            tc.field_here(120, 48)
+            tc._set_presc(Prescription.demo(tc.field, 100, 300))
+            tc.set_autopilot(True)
+            self.assertEqual(tc.autopilot.lanes, 2)
+            tc.set_task("start")
+            switched = set()
+            for k in range(400):
+                sim.step(0.1)
+                client.step(0.1, sim.ground_speed * 3.6, client.work)
+                client.report()
+                tc.tick(0.1, k + 1)
+                switched.add(tuple(client.sections))
+                await asyncio.sleep(0.002)
+                if tc.autopilot.finished:
+                    break
+            self.assertTrue(tc.autopilot.finished)
+            self.assertGreater(tc.coverage.area(), 0.8 * 120 * 48)
+            self.assertLess(tc.coverage.overlap_area(), 0.1 * 120 * 48)
+            self.assertIn(tuple([False] * 8), switched)  # off outside the field and in the turn
+            self.assertIn(tuple([True] * 8), switched)
+            self.assertTrue(100 * 10000 <= client.setpoint <= 300 * 10000)  # rate from the map, raw 0.0001 L/ha
+            self.assertTrue(client.presc_auto)
+            self.assertGreater(len(tc.rows), 5)
+            self.assertIn("Dosis instellen (80 el 3 DDI 1)", tc.log_csv())
+            gj = json.loads(tc.coverage_geojson())
+            self.assertEqual(gj["features"][0]["properties"]["name"], "bewerkt")
+            sim.autopilot = None
+        run(go())
 
 
 if __name__ == "__main__":

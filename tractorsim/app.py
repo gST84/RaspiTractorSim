@@ -11,6 +11,8 @@ import time
 from . import j1939
 from .canbus import open_bus
 from .j1939 import ControlFunction, Network, name_decode, name_encode, name_text, split_id
+from .tc.prescription import MapError
+from .tc.server import BusPosition, TCServer
 from .tecu import MESSAGES, MSG_BY_KEY, PARAMS, Sim, Tractor
 from .vt.objects import PoolError
 from .vt.server import LOCAL, VTServer
@@ -26,6 +28,9 @@ CF_DEFAULTS = {
            "strict": False, "memory": 16 * 1024 * 1024},
     "gnss": {"enabled": True, "address": 0x1C, "identity": 103, "manufacturer": 0, "functionInstance": 0,
              "selfConfigurable": True, "function": 23, "label": "GNSS-ontvanger"},
+    "tc": {"enabled": True, "address": 0xF7, "identity": 104, "manufacturer": 0, "functionInstance": 0,
+           "selfConfigurable": True, "function": 130, "label": "Task controller",
+           "version": 4, "booms": 1, "sections": 16, "channels": 1, "memory": 1024 * 1024},
 }
 
 PRESETS = {
@@ -66,6 +71,8 @@ class App:
         self.cfs = {}
         self.tractor = None
         self.vt = None
+        self.tc = None
+        self.bus_pos = BusPosition(self.net)  # the position of another GNSS receiver, when ours is off
         if web is None:
             from .web import WebServer
             web = WebServer(self, host, port, web_dir)
@@ -77,7 +84,9 @@ class App:
         self.claims = {}  # source address → last Address Claimed frame, so a late analyzer still knows the NAMEs
         self.vtlog_rows = collections.deque(maxlen=400)
         self.vtlog_pending = []
-        self.dirty = {"params": set(), "vt": False, "rx": False}
+        self.tclog_rows = collections.deque(maxlen=400)
+        self.tclog_pending = []
+        self.dirty = {"params": set(), "vt": False, "rx": False, "tc": False}
         self.dirty_objs = {}
         self._save_at = None
         self.on_saved = None  # callable(config text) after every save (the online version keeps it in the browser)
@@ -87,12 +96,14 @@ class App:
 
     # ------------------------------------------------------------ config
     def _load(self):
-        cfg = {"params": {}, "messages": {}, "cf": copy.deepcopy(CF_DEFAULTS)}
+        cfg = {"params": {}, "messages": {}, "cf": copy.deepcopy(CF_DEFAULTS), "tcOpts": {}}
         try:
             with open(self.cfg_path) as fh:
                 saved = json.load(fh)
             cfg["params"].update(saved.get("params", {}))
             cfg["messages"].update(saved.get("messages", {}))
+            if isinstance(saved.get("tcOpts"), dict):
+                cfg["tcOpts"].update(saved["tcOpts"])
             for k, v in saved.get("cf", {}).items():
                 if k in cfg["cf"]:
                     cfg["cf"][k].update(v)
@@ -159,6 +170,21 @@ class App:
                 self.cfs["vt"] = self._make_cf(c)
                 self.vt = VTServer(self.net, self.cfs["vt"], c, self.data_dir, self, self.sim.language)
                 asyncio.get_event_loop().call_later(3.5 if restart else 0, self._start_vt, self.vt)
+        if section in (None, "tc"):
+            restart = self.tc is not None
+            if self.tc:
+                self.tc.stop()
+            old = self.cfs.pop("tc", None)
+            if old:
+                old.stop()
+            self.tc = None
+            c = self.cfg["cf"]["tc"]
+            if c["enabled"] and not self.listen:
+                self.cfs["tc"] = self._make_cf(c)
+                self.tc = TCServer(self.net, self.cfs["tc"], c, self.data_dir, self, self.sim.language, self.position,
+                                   self.cfg["tcOpts"], self.sim)
+                asyncio.get_event_loop().call_later(3.5 if restart else 0, self._start_tc, self.tc)
+            self.dirty["tc"] = True
         self.dirty["vt"] = True
 
     def _start_vt(self, vt):
@@ -166,6 +192,20 @@ class App:
             vt.cf.start()
             vt.start()
             self.dirty["vt"] = True
+
+    def _start_tc(self, tc):
+        if self.tc is tc:
+            tc.cf.start()
+            tc.start()
+            self.dirty["tc"] = True
+
+    def position(self):
+        """Position for the task controller: our own GNSS receiver (the simulation), else one on the bus."""
+        if "gnss" in self.cfs:
+            live = self.sim.live
+            return {"lat": live["lat"], "lon": live["lon"], "heading": live["heading"], "speed": self.sim.ground_speed,
+                    "source": "eigen GNSS"}
+        return self.bus_pos.get()
 
     # ------------------------------------------------------------ events (from Tractor / VTServer)
     def params_changed(self, keys):
@@ -197,6 +237,36 @@ class App:
     def identify(self):
         c = self.cfg["cf"]["vt"]
         self.web.broadcast({"t": "vt.identify", "instance": c["functionInstance"]})
+
+    # ------------------------------------------------------------ events (from TCServer)
+    def tc_changed(self):
+        self.dirty["tc"] = True
+
+    def tc_pool(self, client):
+        self.web.broadcast(self._tc_pool_msg(client))
+
+    def tc_saved(self):
+        self.save_soon()
+
+    def tc_identify(self, addr):
+        c = self.cfg["cf"]["tc"]
+        self.web.broadcast({"t": "toast", "text": f"Werktuig 0x{addr:02X} vraagt het TC-nummer: {c['functionInstance'] + 1}"})
+
+    def tclog(self, entry):
+        self.tclog_rows.append(entry)
+        self.tclog_pending.append(entry)
+
+    def _tc_pool_msg(self, client):
+        p = client.pool or client.stored
+        return {"t": "tc.pool", "addr": client.addr, "objects": p.to_json() if p else []}
+
+    def tc_state(self):
+        cf = self.cfs.get("tc")
+        if not self.tc:
+            return {"t": "tc", "enabled": False}
+        return {"t": "tc", "enabled": True, "address": cf.address if cf else None, "state": cf.state if cf else "uit",
+                "cfg": {k: self.cfg["cf"]["tc"][k] for k in ("version", "booms", "sections", "channels", "functionInstance")},
+                **self.tc.state()}
 
     def _raw(self, direction, can_id, data, t, ext):
         row = (round(t, 6), direction, can_id, data.hex(), 1 if ext else 0)
@@ -263,6 +333,14 @@ class App:
                 if ws.state == "actief":
                     client.send(self._pool_msg(ws))
             client.send({"t": "vt.log", "rows": list(self.vtlog_rows)})
+        client.send(self.tc_state())
+        if self.tc:
+            for c in self.tc.clients.values():
+                if c.pool or c.stored:
+                    client.send(self._tc_pool_msg(c))
+                client.send({"t": "tc.values", "rows": [self.tc.values_all(c)]})
+            client.send({"t": "tc.map", **self.tc.map_full(consume=False)})
+            client.send({"t": "tc.log", "rows": list(self.tclog_rows)})
         client.send(self.bus_state())
 
     async def _flusher(self):
@@ -299,6 +377,19 @@ class App:
         if self.dirty["rx"] and n % 3 == 0:
             self.dirty["rx"] = False
             w.broadcast({"t": "rx", "rows": list(self.tractor.rx.values())})
+        if (self.dirty["tc"] and n % 2 == 0) or n % 10 == 5:
+            self.dirty["tc"] = False
+            w.broadcast(self.tc_state())
+        if self.tc:
+            if n % 3 == 2:
+                rows = self.tc.values_update()
+                if rows:
+                    w.broadcast({"t": "tc.values", "rows": rows})
+            if n % 5 == 3:
+                w.broadcast({"t": "tc.map", **self.tc.map_update()})
+        if self.tclog_pending:
+            w.broadcast({"t": "tc.log", "rows": self.tclog_pending[-200:], "append": True})
+            self.tclog_pending = []
         if self.raw_pending or self.raw_lost:
             w.broadcast({"t": "raw", "rows": self.raw_pending, "lost": self.raw_lost}, sub="raw")
             self.raw_pending = []
@@ -369,6 +460,8 @@ class App:
             cf = self.cfs.get(m.get("cf", "tecu")) or next(iter(self.cfs.values()), None)
             if cf:
                 self.net.request(cf, int(str(m["pgn"]), 16), int(m.get("da", 255)))
+        elif t.startswith("tc."):
+            self._tc_client(client, t, m)
         elif vt is None:
             return
         elif t == "vt.key":
@@ -394,8 +487,51 @@ class App:
             if m["addr"] == LOCAL:
                 vt.remove(LOCAL)
 
+    def _tc_client(self, client, t, m):
+        tc = self.tc
+        if tc is None:
+            client.send({"t": "toast", "error": True, "text": "De task controller staat uit (Instellingen)"})
+            return
+        try:
+            if t == "tc.task":
+                tc.set_task(m["action"])
+            elif t == "tc.opts":
+                tc.set_options(m["values"])
+            elif t == "tc.value":
+                tc.set_value(int(m["addr"]), int(m["element"]), int(m["ddi"]), int(m["value"]))
+            elif t == "tc.field":
+                if m.get("geojson"):
+                    tc.field_geojson(m["geojson"])
+                else:
+                    tc.field_here(float(m.get("length", 200)), float(m.get("width", 96)))
+            elif t == "tc.autopilot":
+                tc.set_autopilot(bool(m.get("on")))
+            elif t == "tc.map":
+                kind = "shp" if str(m.get("name", "")).lower().endswith(".zip") else "geojson"
+                data = base64.b64decode(m["data"])
+                p = tc.load_map(kind, data, str(m.get("name", "Taakkaart")).rsplit(".", 1)[0], m.get("prop") or None)
+                client.send({"t": "toast", "text": f"Taakkaart {p.name}: {len(p.zones)} zones, dosis uit '{p.prop}'"})
+            elif t == "tc.demoMap":
+                tc.demo_map(float(m.get("low", 150)), float(m.get("high", 250)))
+            elif t == "tc.clearMap":
+                tc.clear_map()
+        except (MapError, ValueError, KeyError, TypeError) as e:
+            client.send({"t": "toast", "error": True, "text": f"Task controller: {e}"})
+
     # ------------------------------------------------------------ HTTP API
     def http_api(self, method, path, query, body):
+        if path.startswith("tc/") and self.tc:
+            if path == "tc/log.csv":
+                return 200, "text/csv; charset=utf-8", self.tc.log_csv().encode(), {"Content-Disposition": 'attachment; filename="taak.csv"'}
+            if path == "tc/dekking.geojson":
+                return 200, "application/geo+json", self.tc.coverage_geojson().encode(), {"Content-Disposition": 'attachment; filename="dekking.geojson"'}
+            if path.startswith("tc/ddop/"):
+                addr = int(path[8:].split(".")[0])
+                data = self.tc.ddop_bytes(addr)
+                if data is None:
+                    return None
+                return 200, "application/octet-stream", data, {"Content-Disposition": f'attachment; filename="ddop_{addr:02X}.bin"'}
+            return None
         if path.startswith("pool/") and self.vt:
             addr = int(path[5:].split(".")[0])
             data = self.vt.pool_bytes(addr)

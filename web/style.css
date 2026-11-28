@@ -316,3 +316,43 @@ span.add { cursor: default; }
   .tr .vl { max-width: 14ch; }
   .vwatch td.path { max-width: 160px; }
 }
+
+/* ---------- task controller */
+.tc-layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 14px; align-items: start; }
+.tc-side, .tc-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.tc-mapwrap { position: relative; }
+.tc-canvas { display: block; width: 100%; height: min(62vh, 620px); border-radius: 6px; touch-action: none; cursor: grab; }
+.tc-canvas:active { cursor: grabbing; }
+.tc-tip { position: absolute; pointer-events: none; background: var(--top); color: #fff; font-size: 12px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; z-index: 2; }
+.tc-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.tcl-title { color: var(--ink); }
+.tcl-item { display: inline-flex; align-items: center; gap: 6px; }
+.tcl-item i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; }
+.tc-live dd { font-variant-numeric: tabular-nums; }
+.tc-clients { display: flex; flex-direction: column; gap: 8px; }
+.tc-client { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); }
+.tc-client.sel { border-color: var(--accent); }
+.tc-prog { width: 100%; height: 8px; }
+.tc-secs { display: grid; gap: 2px; margin: 8px 0; }
+.tc-sec { border: 0; border-radius: 4px; padding: 6px 0; font-size: 11px; background: var(--panel2); color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
+.tc-sec.on { background: var(--accent); color: #fff; box-shadow: none; }
+.tc-sec.want { box-shadow: inset 0 0 0 2px var(--accent); color: var(--ink); }
+.tc-sec:disabled { cursor: default; opacity: 1; }
+.tc-sec:not(:disabled) { cursor: pointer; }
+.tc-more { margin-top: 6px; }
+.tc-more summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+.warn-text { color: var(--warn); }
+.tc-tree { max-height: 520px; overflow: auto; }
+.tc-tree tr.tc-el td { background: var(--panel2); padding-top: 6px; }
+.tc-tree tr.tc-dev td { padding-bottom: 6px; }
+.tc-tree .tc-val { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tc-edit { display: inline-flex; gap: 4px; align-items: center; }
+.tc-log { max-height: 300px; }
+@media (max-width: 1100px) {
+  .tc-layout { grid-template-columns: 1fr; }
+  .tc-main { display: contents; }
+  .tc-mapcard { order: -1; }
+  .tc-canvas { height: 56vh; }
+}
+.tc-side .row .lbl { flex-basis: 110px; }
+.tc-side .row + .hint { padding-left: 120px; }

@@ -164,6 +164,7 @@ class Sim:
         self.sid = 0
         self.stop_count = 0
         self.targets = {}  # from implement commands: key → (target, timestamp)
+        self.autopilot = None  # task controller: drives over the field in lanes (tc/field.py Autopilot)
 
     def get(self, key):
         v = self.p[key]
@@ -213,9 +214,11 @@ class Sim:
             cur = self.live[k]
             step = self.p[f"{k}.ramp"] * dt
             self.live[k] = target if abs(target - cur) <= step else cur + math.copysign(step, target - cur)
-        if self.p["gnss.turnRate"]:
+        if self.autopilot is not None:
+            self.autopilot.step(self, dt)
+        elif self.p["gnss.turnRate"]:
             self.live["heading"] = (self.live["heading"] + self.p["gnss.turnRate"] * dt) % 360.0
-        if self.p["gnss.move"] and self.ground_speed > 0:
+        if self.autopilot is None and self.p["gnss.move"] and self.ground_speed > 0:
             d = self.ground_speed * dt * (1 if self.p["drive.direction"] != 0 else -1)
             h = math.radians(self.live["heading"])
             self.live["lat"] += d * math.cos(h) / 111320.0

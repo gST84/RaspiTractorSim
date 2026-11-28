@@ -1,14 +1,15 @@
 # raspISO
 
-Een ISOBUS-tractor op een Raspberry Pi met CAN-HAT. De Pi doet zich voor als **tractor-ECU**, **virtuele terminal (VT)**
-en **GNSS-ontvanger**. Via een webpagina stel je alle tractorwaarden in en bedien je de VT waarop het werktuig zijn
-scherm (object pool) toont.
+Een ISOBUS-tractor op een Raspberry Pi met CAN-HAT. De Pi doet zich voor als **tractor-ECU**, **virtuele terminal (VT)**,
+**GNSS-ontvanger** en **task controller (TC)**. Via een webpagina stel je alle tractorwaarden in, bedien je de VT waarop
+het werktuig zijn scherm (object pool) toont en volg je de taak: documentatie, sectiebesturing en taakkaarten.
 
 ```
  werktuig ──ISOBUS 250 kbit/s── CAN-HAT ── Raspberry Pi ── wifi/ethernet ── browser (pc, tablet, gsm)
                                             ├ Tractor-ECU   adres F0
                                             ├ VT            adres 26
-                                            └ GNSS          adres 1C
+                                            ├ GNSS          adres 1C
+                                            └ TC            adres F7
 ```
 
 Geen externe Python-pakketten: SocketCAN, de webserver en de WebSocket komen uit de standaardbibliotheek
@@ -26,9 +27,10 @@ de instellingen blijven in de browser bewaard. Zelf bouwen: `python3 tools/build
 |---|---|
 | **Tractor** | Alle gesimuleerde waarden als schuifregelaar, knop of keuzelijst; live tegels; scenario's (stilstand, transport, veldwerk, kopakker); tabel van verzonden berichten (aan/uit, interval, laatste data, "Zend"); wat werktuigen naar de tractor sturen. |
 | **Virtuele terminal** | Het scherm van de VT: werksetknoppen links, actief data- of alarmmasker, softkeys rechts (met paginering als er meer zijn dan fysieke toetsen). Klik/tik op softkeys, knoppen en invoervelden; berichtenlog; pool downloaden als `.iop`; een `.iop` openen zonder werktuig (bv. uit PLC-VT-Designer). |
+| **Taakcontroller** | De task controller: aangemelde werktuigen met hun beschrijving (DDOP) en procesdata, taak starten/stoppen, sectiebesturing, taakkaart, perceel en automatisch rijden, een kaart met dekking en dosiszones. Zie [Task controller](#task-controller). |
 | **Bus** | Busbelasting en foutframes, alle knooppunten met gedecodeerde NAME, live CAN-log met filter, CSV-export, een frame of request zelf versturen. |
 | **Variabelen** | CAN-analyzer: de bus als boom van toestellen, berichten en signalen (zoals een OPC UA-client), attributen, volglijst met trend. Bron: de simulator, een USB- of seriële adapter rechtstreeks in de browser, of een logbestand. Zie [Variabelen](#variabelen-can-analyzer). |
-| **Instellingen** | Per ECU: aan/uit, adres, NAME. VT: versie, schermgrootte, softkeys, strenge poolcontrole. |
+| **Instellingen** | Per ECU: aan/uit, adres, NAME. VT: versie, schermgrootte, softkeys, strenge poolcontrole. TC: versie, aantal booms, secties en kanalen. |
 
 ## Snel proberen zonder hardware (ook op een Mac of pc)
 
@@ -142,7 +144,9 @@ een CAN-adapter in je computer.
 ### Op een echte tractor
 
 Zet op de pagina **Instellingen** de Tractor-ECU en de GNSS-ontvanger uit: anders zenden twee TECU's tegenstrijdige
-waarden. De VT kan blijven: kies een vrij adres en functie-instantie 1 als er al een terminal op de bus zit.
+waarden. De VT kan blijven: kies een vrij adres en functie-instantie 1 als er al een terminal op de bus zit. Hetzelfde
+voor de task controller: de display van de tractor is meestal zelf een TC. Zonder eigen GNSS neemt de TC de positie
+van de bus (Vehicle Position, of NMEA 2000 129025/129026).
 
 Enkel meekijken (pagina **Variabelen**)? Start dan met `--listen`: geen eigen ECU's en de simulator zendt niets,
 ook niet via "Zend" op de Bus-pagina. Wie het ook op de interface wil afdwingen: `ip link set can0 type can
@@ -232,6 +236,39 @@ en Machine Selected Speed Command (FD43). De hef volgt een commando met de inges
 dan blijft de laatste waarde staan. Deze drie layouts zijn **niet geverifieerd**: de ruwe bytes staan erbij in de tabel
 "Ontvangen van werktuigen", vergelijk ze met een log van een echt werktuig.
 
+## Task controller
+
+De TC volgt ISO 11783-10, versie 3 of 4 (in te stellen). Hij meldt in zijn versiebericht documentatie (TC-BAS), taakkaarten
+(TC-GEO) en sectiebesturing (TC-SC); de laatste twee kun je op de pagina uitschakelen.
+
+- **Aanmelden:** versie, structuur- en taallabel, de beschrijving (DDOP) via TP of ETP, activeren, wissen, Change Designator.
+  De DDOP wordt per NAME bewaard: een werktuig met dezelfde labels activeert hem zonder hem opnieuw te sturen. Een DDOP met
+  een fout wordt geweigerd met het foute object. Na 6 s zonder Client Task valt een werktuig weg.
+- **Procesdata:** na het activeren stelt de TC de metingen in volgens de triggermethoden van elke DPD (tijd 1 s, bij
+  verandering) en vraagt hij elke waarde op. Op de pagina zie je per element de waarde van het werktuig en wat de TC
+  stuurde, en zet je een instelbare waarde met de hand.
+- **Taak:** start zet de taakbit in de TC Status en Setpoint Work State (DDI 289) op aan; het logboek bewaart elke seconde
+  positie, snelheid, secties, dosis en alle procesdata (downloaden als CSV). Totalen tonen de stand en wat er sinds de start
+  bij kwam. De dekking is te downloaden als GeoJSON.
+- **Sectiebesturing:** de secties komen uit de DDOP (offsets DDI 134/135, breedte DDI 67, ten opzichte van de koppeling);
+  de afstand van de GNSS-antenne tot de koppeling stel je op de pagina in. Een sectie gaat uit buiten het perceel of op
+  bewerkte grond (instelbare overlap, standaard 50 %), met vooruitkijken. De TC stuurt Setpoint Condensed Work State
+  (DDI 290+) zolang het werktuig Section Control State (DDI 160) = automatisch meldt; de werkelijke stand komt uit
+  Actual Condensed Work State (DDI 161+). Met de hand: een knop per sectie.
+- **Taakkaart:** een GeoJSON (polygonen met een numerieke eigenschap) of een shapefile (.zip met .shp/.dbf/.prj, in WGS84),
+  of een demokaart over het perceel. De dosis staat in de eenheid van het werktuig (de weergave van zijn setpunt in de
+  DDOP, bv. L/ha); de TC stuurt de dosis op het vooruitkijkpunt naar het gekozen setpunt.
+- **Perceel en rijden:** een rechthoek vanaf de huidige positie, of een grens uit een GeoJSON. Met de eigen GNSS rijdt de
+  simulator automatisch in banen over een rechthoekig perceel (baanafstand = werkbreedte), met kopakkerbochten buiten
+  het perceel.
+
+Het testwerktuig (`tools/fake_implement.py`) is ook een TC-client: een spuit met 8 secties van 3 m
+(`tools/demo_tc.py`). Starten met de taak zet het spuiten aan. Getest met dit testwerktuig en in de tests; nog **niet
+met TC_Client van PLC-VT-Designer of een echt werktuig**.
+
+Niet in deze versie: peer control, ISO-XML (taakdata en grid-taakkaarten), getrokken werktuigen die anders volgen dan
+de tractor, meerdere booms of producten in de sectiebesturing.
+
 ## Wat de VT kan
 
 - Verbinden: Working Set Maintenance (time-out 3 s), Get Memory, Get Number of Soft Keys, Get Text Font Data, Get Hardware,
@@ -263,9 +300,11 @@ Change Attribute volgt de veldvolgorde van de objecten (niet tegen de norm gecon
 | `tractorsim/tecu.py` | instelbare waarden, berichtencoders, dynamiek, werktuigcommando's |
 | `tractorsim/vt/objects.py` | object pool: definities, parser, encoder, controle |
 | `tractorsim/vt/server.py` | de virtuele terminal |
+| `tractorsim/tc/` | de task controller: `server.py` (protocol, taak, logboek), `ddop.py`, `section.py`, `field.py` (perceel, dekking, automatisch rijden), `prescription.py` (taakkaarten) |
 | `tractorsim/app.py`, `web.py` | samenhang, configuratie, HTTP + WebSocket |
 | `web/` | de webinterface; `web/vt/render.js` is afgeleid van `src/render.js` van PLC-VT-Designer |
-| `tools/fake_implement.py`, `tools/demo_pool.py` | testwerktuig en zijn object pool |
+| `tools/fake_implement.py`, `tools/demo_pool.py`, `tools/demo_tc.py` | testwerktuig, zijn object pool en zijn TC-client (spuit) |
+| `web/tcpage.js`, `web/tc/map.js` | pagina Taakcontroller en de kaart |
 | `web/variables.js`, `web/can/` | pagina Variabelen: frames, transport (TP/ETP/fast packet), signalen, ingebouwde database, DBC, DDOP/DDI, model |
 | `web/can/sources/` | bronnen: server, WebUSB-drivers (`usb.js`), slcan (`slcan.js`), logbestanden (`logfile.js`) |
 | `web/can/simbus.js`, `tractorsim/browser.py` | de online versie: demo of een echte bus via de adapter (WebUSB/WebSerial) |

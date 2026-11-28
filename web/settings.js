@@ -1,4 +1,4 @@
-// Settings page: the three simulated control functions (tractor ECU, virtual terminal, GNSS) and, in the online
+// Settings page: the simulated control functions (tractor ECU, virtual terminal, GNSS, task controller) and, in the online
 // version, the CAN bus: the demo bus or a CAN adapter of this computer (web/can/simbus.js).
 import { h, hex, send, on, isDemo } from './util.js';
 import { simBus, BITRATES, BAUDS } from './can/simbus.js';
@@ -23,7 +23,13 @@ const VT_FIELDS = [
   ['virtualKeys', 'Virtuele softkeys per masker', 'int'],
   ['strict', 'Strenge poolcontrole', 'bool', 'pool weigeren bij verwijzingen naar onbestaande objecten'],
 ];
-const TITLES = { tecu: 'Tractor-ECU', vt: 'Virtuele terminal', gnss: 'GNSS-ontvanger' };
+const TC_FIELDS = [
+  ['version', 'TC-versie', 'select', 'in het versiebericht aan de werktuigen', [[3, '3'], [4, '4']]],
+  ['booms', 'Booms (sectiebesturing)', 'int', 'versiebericht: aantal booms voor TC-SC'],
+  ['sections', 'Secties (sectiebesturing)', 'int', 'versiebericht: aantal secties voor TC-SC'],
+  ['channels', 'Kanalen (taakkaart)', 'int', 'versiebericht: aantal kanalen voor TC-GEO'],
+];
+const TITLES = { tecu: 'Tractor-ECU', vt: 'Virtuele terminal', gnss: 'GNSS-ontvanger', tc: 'Task controller' };
 
 export function mount(el) {
   root = el;
@@ -34,10 +40,10 @@ function render(cfg, busSpec) {
   root.replaceChildren(
     h('div', { class: 'note' }, h('b', null, 'Op een echte tractorbus: '),
       'zet de Tractor-ECU (en de GNSS-ontvanger) uit, anders spreken twee TECU’s elkaar tegen. ',
-      'De VT kan wel blijven: kies dan een vrij adres en functie-instantie 1 als er al een terminal is.'),
+      'De VT kan wel blijven: kies dan een vrij adres en functie-instantie 1 als er al een terminal is. Hetzelfde voor de task controller (bv. de display van de tractor).'),
     h('div', { class: 'grid' },
       isDemo() ? (busCard ||= canCard()) : null,
-      ['tecu', 'vt', 'gnss'].map((key) => section(key, cfg[key])),
+      ['tecu', 'vt', 'gnss', 'tc'].filter((key) => cfg[key]).map((key) => section(key, cfg[key])),
       isDemo() ? null : h('section', { class: 'card' }, h('h3', null, 'Systeem'),
         h('dl', null, h('dt', null, 'CAN-interface'), h('dd', { class: 'mono' }, busSpec),
           h('dt', null, 'Bitrate'), h('dd', null, 'ISOBUS: 250 kbit/s, in te stellen met ', h('code', null, 'ip link'), ' (zie README)')),
@@ -134,7 +140,7 @@ function canCard() {
 
 function section(key, c) {
   const vals = {};
-  const rows = [...FIELDS, ...(key === 'vt' ? VT_FIELDS : [])].map(([k, label, kind, hint, opts]) => {
+  const rows = [...FIELDS, ...(key === 'vt' ? VT_FIELDS : key === 'tc' ? TC_FIELDS : [])].map(([k, label, kind, hint, opts]) => {
     let inp;
     if (kind === 'bool') {
       inp = h('input', { type: 'checkbox', checked: !!c[k] });

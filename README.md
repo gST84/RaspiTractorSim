@@ -1,4 +1,4 @@
-# RaspiTractorSim
+# raspISO
 
 Een ISOBUS-tractor op een Raspberry Pi met CAN-HAT. De Pi doet zich voor als **tractor-ECU**, **virtuele terminal (VT)**
 en **GNSS-ontvanger**. Via een webpagina stel je alle tractorwaarden in en bedien je de VT waarop het werktuig zijn

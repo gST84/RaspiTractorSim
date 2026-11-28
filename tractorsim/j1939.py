@@ -123,7 +123,7 @@ class ControlFunction:
         self.requests = {}  # pgn → fn(msg) returning bytes (or None = do not answer)
         self.on_claimed = []
         self._claim_task = None
-        self.requests[PGN_SOFTWARE_ID] = lambda m: b"\x01RaspiTractorSim*0.1*"
+        self.requests[PGN_SOFTWARE_ID] = lambda m: b"\x01raspISO*0.1*"
 
     @property
     def active(self):

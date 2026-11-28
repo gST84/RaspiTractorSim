@@ -1,6 +1,6 @@
-# systemd-service voor RaspiTractorSim. deploy/install.sh vult USER en DIR in en installeert hem.
+# systemd-service voor raspISO. deploy/install.sh vult USER en DIR in en installeert hem.
 [Unit]
-Description=RaspiTractorSim - ISOBUS-tractorsimulator met virtuele terminal
+Description=raspISO - ISOBUS-tractorsimulator met virtuele terminal
 After=network.target
 Wants=network.target
 

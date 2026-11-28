@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installeert RaspiTractorSim als systemd-service op de Raspberry Pi.
+# Installeert raspISO als systemd-service op de Raspberry Pi.
 #   sudo deploy/install.sh [can0] [8080]
 # Start daarna automatisch bij het opstarten; webinterface op http://<pi>:8080
 set -e

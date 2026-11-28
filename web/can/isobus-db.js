@@ -1,6 +1,6 @@
 // Built-in ISOBUS (ISO 11783-7) / SAE J1939 / NMEA 2000 messages as signal definitions (see signals.js).
 //
-// Sources, the same as the rest of RaspiTractorSim and PLC-VT-Designer:
+// Sources, the same as the rest of raspISO and PLC-VT-Designer:
 //   - the status messages of the tractor: ISO_TractorDecode (checked against a real tractor log) and tecu.py;
 //   - commands from implements (Hitch and PTO Commands, Aux Valve Command, Tractor Facilities, Machine Selected
 //     Speed Command, Maintain Power): ISO 11783-7:2002 annex B and AgIsoStack++, as in ISO_TractorEcu;

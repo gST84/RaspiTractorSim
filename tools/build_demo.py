@@ -31,7 +31,7 @@ PY_SOURCES = ["tractorsim", "tools/fake_implement.py", "tools/demo_pool.py"]
 BOOT = """
 <div id="boot" role="status" aria-live="polite">
   <div class="boot-card">
-    <b>RaspiTractorSim wordt gestart</b>
+    <b>raspISO wordt gestart</b>
     <p id="boot-step">Python laden (ongeveer 12 MB, de eerste keer)…</p>
     <p class="muted" id="boot-what">Tractor-ECU, virtuele terminal, GNSS en een testwerktuig draaien hier in je browser op een
     gesimuleerde CAN-bus. Op een Raspberry Pi met CAN-HAT praat dezelfde code met een echt werktuig.</p>
@@ -163,9 +163,9 @@ def page(out_css, fragment=False):
     html = open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
     body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
     body = re.sub(r'<script type="module" src="app.js"></script>\s*', "", body)
-    body = body.replace('RaspiTractorSim</a>', 'RaspiTractorSim</a>\n  <span class="demo-badge" title="Alles draait in deze '
+    body = body.replace('raspISO</a>', 'raspISO</a>\n  <span class="demo-badge" title="Alles draait in deze '
                         'browser op een gesimuleerde CAN-bus, met een testwerktuig (pagina Instellingen: echte bus)">demo</span>', 1)
-    head = ('<title>RaspiTractorSim</title>\n<meta name="theme-color" content="#1f2a22">\n'
+    head = ('<title>raspISO</title>\n<meta name="theme-color" content="#1f2a22">\n'
             f"<style>\n{out_css}\n{DEMO_CSS}</style>\n")
     if fragment:
         return head + body.strip() + "\n" + BOOT
@@ -183,12 +183,12 @@ ANALYZER_CSS = """
 def analyzer_page(out_css):
     html = open(os.path.join(ROOT, "web", "index.html"), encoding="utf-8").read()
     body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
-    body = body.replace('RaspiTractorSim</a>', 'RaspiTractorSim</a>\n  <span class="analyzer-badge" title="Enkel de CAN-analyzer: '
+    body = body.replace('raspISO</a>', 'raspISO</a>\n  <span class="analyzer-badge" title="Enkel de CAN-analyzer: '
                         'USB- of seriële adapter, of een logbestand">analyzer</span>', 1)
     return ('<!doctype html>\n<html lang="nl">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
             '<meta name="theme-color" content="#1f2a22">\n<link rel="icon" href="icon.svg">\n'
-            '<title>RaspiTractorSim Analyzer</title>\n'
+            '<title>raspISO Analyzer</title>\n'
             f"<style>\n{out_css}\n{ANALYZER_CSS}</style>\n</head>\n<body data-mode=\"analyzer\">\n{body.strip()}\n</body>\n</html>\n")
 
 
